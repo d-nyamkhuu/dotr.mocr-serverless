@@ -335,7 +335,7 @@ def estimated_height(nodes: list[Any], width: float, size: float, metrics: FontM
                 if child.tag in {qn("m:oMath"), qn("m:oMathPara")}:
                     text = visible_text(child)
                     advance = metrics.width(text, size) + size * 0.3
-                    factor = 2.4 if any(True for _ in child.iter(qn("m:f"))) else 1.6
+                    factor = 2.4 if any(True for _ in child.iter(qn("m:f"), qn("m:nary"))) else 1.6
                     rows = list(child.iter(qn("m:mr")))
                     factor = max(factor, len(rows) * 1.2)
                     tokens = [(advance, line_height * factor, False)]
@@ -698,6 +698,20 @@ def text_geometry(page: Page, region: Region, size: float | None) -> tuple[int, 
     return left, top, width, height + round(reserve)
 
 
+def formula_geometry(page: Page, region: Region, geometry: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
+    """Widen a centered display equation into free space beside it.
+
+    Word breaks an equation that is wider than its text box onto a new line,
+    which the box then clips. Font substitution makes that width hard to predict.
+    """
+    x1, y1, x2, y2 = region.bbox
+    beside = [other.bbox for other in page.regions if other is not region and other.bbox[1] < y2 and other.bbox[3] > y1]
+    left = max((bbox[2] for bbox in beside if bbox[2] <= x1), default=0)
+    right = min((bbox[0] for bbox in beside if bbox[0] >= x2), default=page.width)
+    margin = round(min(x1 - left, right - x2) * page_geometry(page)[2])
+    return geometry[0] - margin, geometry[1], geometry[2] + 2 * margin, geometry[3]
+
+
 def avoid_graphics(page: Page, boxes: list[tuple[int, int, int, int]], warnings: list[str]) -> tuple[Page, list[tuple[int, int, int, int]]]:
     """Reserve space for edge graphics; do not cover editable text with an uncertain crop."""
     regions = list(page.regions)
@@ -817,13 +831,16 @@ def export_word(pages: Sequence[Page], output: Path, *, font: str = "Arial", rec
                         if region.category == "Table" and size is not None and size > body_size * 1.4:
                             warnings.append(f"{region.label}: table font measurement may include rules or fills; using page body size {body_size:g} pt")
                             size, pitch = body_size, None
+                        if region.category == "Formula":
+                            size = body_size
                         geometry = region_geometry(page, region) if region.rotation else text_geometry(page, region, size)
                         fitting = (*geometry[:2], geometry[3], geometry[2]) if region.rotation in {90, 270} else geometry
                         with image.crop(region.bbox) as crop:
                             if region.rotation:
                                 crop = crop.rotate(region.rotation, expand=True)
-                            format_region(nodes, fitting, region, document._body, warnings, metrics, crop,
-                                          size or (body_size if region.category == "Formula" else None), pitch)
+                            format_region(nodes, fitting, region, document._body, warnings, metrics, crop, size, pitch)
+                        if region.category == "Formula" and not region.rotation:
+                            geometry = formula_geometry(page, region, geometry)
                         add_textbox(paragraph, identifier, region, geometry, nodes)
                     region_index += 1
                 for index, box in enumerate(boxes, start=1):

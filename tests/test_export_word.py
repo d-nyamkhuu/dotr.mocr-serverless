@@ -327,6 +327,25 @@ class WordExportTests(unittest.TestCase):
         abstract = numbering.xpath(f'//w:abstractNum[@w:abstractNumId="{abstract_id}"]', namespaces=NS)[0]
         self.assertTrue(abstract.xpath('.//w:lvlText[@w:val="%1.%2.%3."]', namespaces=NS))
 
+    def test_display_equation_box_widens_around_its_center(self):
+        # Word breaks a display equation wider than its box onto a clipped second line.
+        source = r'\hat{e}_i = \sum_{j=1}^{n} e_j R_i^j = e_j R_i^j.'
+        payload = response(elements=[
+            element('Text', 'Side note', (20, 300, 180, 360)),
+            element('Formula', source, (250, 300, 350, 360)),
+        ])
+        xml, _ = self.convert(payload)
+        pages = load_pages(payload, [self.image])
+        left, _, width, height = region_geometry(pages[0], pages[0].regions[1])
+        anchor = xml.xpath('//wp:anchor[wp:docPr/@name="Page 1, region 2"]', namespaces=NS)[0]
+        offset = int(anchor.xpath('./wp:positionH/wp:posOffset/text()', namespaces=NS)[0])
+        extent = anchor.find('wp:extent', NS)
+        self.assertEqual(offset + int(extent.get('cx')) / 2, left + width / 2)
+        note_left, _, note_width, _ = region_geometry(pages[0], pages[0].regions[0])
+        self.assertAlmostEqual(offset, note_left + note_width, delta=1)
+        self.assertGreater(int(extent.get('cx')), width * 2)
+        self.assertGreater(int(extent.get('cy')), height)
+
     def test_failed_normalized_math_preserves_original(self):
         source = r'(R^{-1})_j^i + \notARealCommand{x}'
         xml, warnings = self.convert(response(elements=[element('Formula', source)]))
