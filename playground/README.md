@@ -23,10 +23,12 @@ removes the token; files and results are never persisted. If browser storage
 is unavailable, the connection stays in memory. Credentials are entered at
 runtime, never included in the frontend build, Actions variables, or URLs.
 
-Inspect the source image with interactive layout boxes, Markdown source,
-regions, JSON, and raw model output. Copy or download the selected output.
-Model text is displayed as text, including HTML tables, rather than executed
-as HTML. Degraded responses remain usable even without layout boxes.
+Inspect the source image with interactive layout boxes, rendered Markdown
+(with KaTeX formulas and HTML tables), regions, JSON, and raw model output.
+The Source toggle shows the Markdown text. Copy or download the selected
+output. Rendered HTML is sanitized and images are dropped, so model output
+cannot run scripts or load URLs. Degraded responses remain usable even without
+layout boxes.
 
 Only explicit Run OCR clicks submit requests. Stop waiting aborts the browser
 request; it does not cancel GPU work. The browser stops waiting after 145

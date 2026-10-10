@@ -26,7 +26,11 @@ This quarter we explored the practical applications of large language models in 
 
 ## Next Steps
 
-In Q3 we will expand our evaluation to multilingual documents, explore layout-aware models, and build a larger benchmark dataset to better represent real-world scenarios.`;
+In Q3 we will expand our evaluation to multilingual documents, explore layout-aware models, and build a larger benchmark dataset to better represent real-world scenarios.
+
+$$
+\\frac{AC}{CB} = \\lambda
+$$`;
 const result = {
   request_id: "607c2c28-1f3e-4b9a-b2d5-8e2f4c7a9d10",
   status: "ok",
@@ -127,9 +131,15 @@ test("upload, bearer auth, regions, output formats, and downloads", async ({
   await expect(page.getByLabel("Response details")).toContainText(
     "1,690 tokens",
   );
-  await expect(page.getByRole("tabpanel")).toContainText(
-    "# Quarterly Research Notes",
-  );
+  const output = page.getByRole("tabpanel");
+  await expect(
+    output.getByRole("heading", { name: "Quarterly Research Notes" }),
+  ).toBeVisible();
+  await expect(output.getByRole("table")).toContainText("Handwritten Forms");
+  await expect(output.locator(".katex-display")).toHaveCount(1);
+  await page.getByRole("button", { name: "Source", exact: true }).click();
+  await expect(output).toContainText("# Quarterly Research Notes");
+  await page.getByRole("button", { name: "Preview", exact: true }).click();
   await page.getByRole("button", { name: "Zoom in", exact: true }).click();
   await expect(page.getByRole("button", { name: "Reset zoom" })).toHaveText(
     "125%",
@@ -217,9 +227,11 @@ test("URL requests and degraded responses preserve output without regions", asyn
   await expect(page.getByRole("status")).toContainText(
     "Recognition is degraded",
   );
-  await expect(page.getByRole("tabpanel")).toContainText(
-    "# Quarterly Research Notes",
-  );
+  await expect(
+    page
+      .getByRole("tabpanel")
+      .getByRole("heading", { name: "Quarterly Research Notes" }),
+  ).toBeVisible();
   await page.getByRole("tab", { name: "Regions", exact: true }).click();
   await expect(page.getByRole("tabpanel")).toContainText(
     "Layout regions are unavailable",
@@ -333,6 +345,8 @@ test("malformed API responses do not crash the viewer or execute markup", async 
     route.fulfill({ json: { ...result, markdown: markup } }),
   );
   await page.getByRole("button", { name: "Run OCR", exact: true }).click();
-  await expect(page.getByRole("tabpanel")).toHaveText(`1${markup}`);
   await expect(page.getByRole("tabpanel").locator("img")).toHaveCount(0);
+  await page.getByRole("button", { name: "Source", exact: true }).click();
+  await expect(page.getByRole("tabpanel")).toHaveText(`1${markup}`);
+  expect(await page.evaluate(() => "ocrUnsafe" in window)).toBe(false);
 });

@@ -17,6 +17,7 @@ const paths = {
       <circle cx="9" cy="10" r="1" />
     </>
   ),
+  code: <path d="m8 7-5 5 5 5m8-10 5 5-5 5" />,
   play: <path d="m8 5 11 7-11 7Z" />,
   clock: (
     <>

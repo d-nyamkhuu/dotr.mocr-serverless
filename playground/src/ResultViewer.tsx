@@ -1,4 +1,11 @@
-import { useMemo, useRef, useState, type KeyboardEvent } from "react";
+import {
+  lazy,
+  Suspense,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent,
+} from "react";
 import type { ParseResult } from "./api";
 import Icon from "./Icon";
 
@@ -12,6 +19,8 @@ const colors: Record<string, string> = {
   Formula: "#9a66c5",
   "List-item": "#11a5a3",
 };
+
+const MarkdownPreview = lazy(() => import("./MarkdownPreview"));
 
 function saveFile(content: string, filename: string, type: string) {
   const url = URL.createObjectURL(new Blob([content], { type }));
@@ -40,6 +49,7 @@ export default function ResultViewer({
   const [tab, setTab] = useState<(typeof tabs)[number]>("Markdown");
   const [selected, setSelected] = useState<number | null>(null);
   const [zoom, setZoom] = useState(1);
+  const [showSource, setShowSource] = useState(false);
   const [copied, setCopied] = useState(false);
   const [actionError, setActionError] = useState("");
   const [failedSource, setFailedSource] = useState<string | null>(null);
@@ -293,6 +303,18 @@ export default function ResultViewer({
               ))}
             </div>
             <div className="output-actions">
+              {tab === "Markdown" ? (
+                <button
+                  type="button"
+                  className="small-button"
+                  aria-pressed={showSource}
+                  onClick={() => setShowSource(!showSource)}
+                  disabled={!result}
+                >
+                  <Icon name={showSource ? "eye" : "code"} />
+                  {showSource ? "Preview" : "Source"}
+                </button>
+              ) : null}
               <button
                 type="button"
                 className="small-button"
@@ -370,6 +392,12 @@ export default function ResultViewer({
                   ))
                 )}
               </div>
+            ) : tab === "Markdown" && !showSource ? (
+              <Suspense
+                fallback={<p className="no-regions">Loading preview…</p>}
+              >
+                <MarkdownPreview markdown={result.markdown} />
+              </Suspense>
             ) : (
               <div className="code-output">
                 {lines.map((line, index) => (
