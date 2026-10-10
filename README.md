@@ -15,7 +15,199 @@ deployment. It calls the API directly with your bearer token and displays image
 regions, Markdown, raw output, and JSON.
 
 Saved results can be turned into editable Word documents with the local
-[Word exporter](#export-editable-word-documents).
+[Word exporter](word_export/README.md).
+
+![OCR Studio showing detected layout regions on a page with three tables](assets/screenshots/studio-regions.png)
+
+## Contents
+
+- [How it works](#how-it-works)
+- [Performance](#performance)
+- [Deploy](#deploy)
+- [API](#api)
+- [Concurrent client and benchmark](#concurrent-client-and-benchmark)
+- [Export editable Word documents](#export-editable-word-documents)
+- [Runtime and security](#runtime-and-security)
+- [Development](#development)
+- [Model license and acceptable use](#model-license-and-acceptable-use)
+
+## How it works
+
+```mermaid
+flowchart LR
+    client["Client<br/>OCR Studio · batch client · curl"]
+    subgraph container["Modal L40S container"]
+        api["FastAPI layout API<br/>bearer auth · validation · resize"]
+        vllm["vLLM · 127.0.0.1:8000<br/>dots.mocr"]
+    end
+    weights[("Modal Volume<br/>pinned model revision")]
+
+    client -- "POST /v1/parse<br/>PNG/JPEG or HTTPS URL" --> api
+    api -- "chat completion" --> vllm
+    vllm -- "layout JSON" --> api
+    api -- "elements · Markdown · usage" --> client
+    weights -.-> vllm
+```
+
+Each container runs the public API and a private vLLM server side by side.
+Requests from many clients share one vLLM process, which batches them on the
+GPU. Containers scale to zero when idle and restore from a memory snapshot.
+
+## Performance
+
+Measured on 2026-10-10 against this repository's deployment: L40S replicas,
+vLLM `0.27.1`, and the settings in [Runtime and security](#runtime-and-security),
+except that the sweep below allowed 64 concurrent inputs per replica; see
+[Two replicas under a burst](#two-replicas-under-a-burst) for the current limit of 32.
+Latency is end to end, timed by the [benchmark](#concurrent-client-and-benchmark)
+running in a Modal container.
+
+The 256 requests used 164 distinct document pages: arXiv papers rendered at
+150 DPI, IRS forms, and the Word exporter's regression pages. Repeated pages had
+one pixel changed so vLLM could not reuse cached images. The median request had
+11,901 prompt tokens and 1,314 completion tokens.
+
+| Concurrent requests | Requests | Pages/min | Completion tokens/s | p50 | p90 | Max | Degraded |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 8 | 5.0 | 91 | 10.6 s | 22.5 s | 22.5 s | 0 |
+| 4 | 8 | 3.0 | 171 | 30.5 s | 140.3 s | 140.3 s | 1 |
+| 8 | 16 | 9.9 | 175 | 39.0 s | 85.7 s | 91.2 s | 0 |
+| 16 | 32 | 6.3 | 259 | 85.7 s | 166.2 s | 231.6 s | 2 |
+| 32 | 64 | 9.3 | 264 | 115.3 s | 287.4 s | 414.2 s | 1 |
+| 64 | 128 | 13.9 | 447 | 179.8 s | 390.7 s | 552.7 s | 5 |
+
+No request failed. A `degraded` response has unparseable layout JSON and no
+layout boxes. Four pages, three of them dense IRS forms, did this every time
+they ran: the model repeated content until it stopped at 18,016–20,059
+completion tokens. One more page stopped normally at 2,888 tokens with
+malformed JSON. A runaway page can dominate a small level: the 4-request level
+spent 140 of its 162 seconds on one. Completion tokens per second is therefore
+the steadier throughput measure.
+
+![Latency percentiles and throughput by concurrency](assets/benchmarks/concurrency.png)
+
+Latency follows output length, and rises with the number of requests sharing a
+GPU:
+
+![Latency against completion tokens for each concurrency level](assets/benchmarks/latency-vs-tokens.png)
+
+### Cold and warm starts
+
+| Measurement | Result |
+|---|---:|
+| Warm request, single user, p50 | 10.6 s |
+| Cold request after scale to zero, restored from the GPU snapshot | 19.8–20.8 s |
+| The same page warm, one pixel changed | 7.6–8.3 s |
+| Cold-start overhead: container restore ~9 s, vLLM wake-up ~1 s | ~12 s |
+| First request when Modal builds a new GPU snapshot | 2.5–3 min |
+
+Modal builds the snapshot on the first request after a deployment, which took
+2 min 42 s, and occasionally again later; that happened on one of the three
+measured cold starts (167 s).
+
+![Cold requests compared with the same pages warm](assets/benchmarks/cold-warm.png)
+
+### Two replicas under a burst
+
+The sweep allowed one container to accept up to 64 requests
+(`@modal.concurrent(max_inputs=64, target_inputs=32)`). When 64 requests
+arrived at once, the warm replica took nearly all of them. A second replica
+started, but received new requests only as the first one's requests finished,
+so the load evened out only after about five minutes.
+
+Lowering `max_inputs` to 32 makes Modal queue the overflow for the second
+replica instead. Both replicas ran 32 requests within 15 seconds of the burst.
+For the same 128 requests at concurrency 64, each from zero containers with one
+warm-up request:
+
+| Per-replica limit | Pages/min | Completion tokens/s | p50 | p90 | Max | Errors |
+|---|---:|---:|---:|---:|---:|---:|
+| `max_inputs=64` | 13.9 | 447 | 179.8 s | 390.7 s | 552.7 s | 0 |
+| `max_inputs=32` (current) | 16.4 | 515 | 152.6 s | 327.0 s | 468.1 s | 0 |
+
+![Requests running on each replica with max_inputs 64 and 32](assets/benchmarks/replicas-ab.png)
+
+Each configuration ran once. Repeating the 64-input level varied throughput by
+about 10%, so the gain in throughput is modest; the even split between replicas
+is the clear change. The 32-input limit costs nothing below 32 concurrent
+requests. Above it, part of a burst on one warm replica waits about 15 seconds for the
+second replica's cold start.
+
+![Start and duration of each request at concurrency 64, max_inputs=64](assets/benchmarks/timeline.png)
+
+The raw per-request results are in
+[`assets/benchmarks/2026-10-10.json`](assets/benchmarks/2026-10-10.json). Run the
+[benchmark](#concurrent-client-and-benchmark) on your own documents, since
+output length drives latency.
+
+## Deploy
+
+Install [`uv`](https://docs.astral.sh/uv/getting-started/installation/), sync the
+locked project environment, and select the intended Modal profile:
+
+```bash
+uv sync --locked
+uv run modal profile current
+```
+
+Generate a random OCR bearer token:
+
+```bash
+uv run python -c 'import secrets; print(secrets.token_urlsafe(32))'
+```
+
+Put `DOTS_MOCR_TOKEN=<generated-token>` in a private, ignored `.env` file,
+then create the OCR secret:
+
+```bash
+uv run --with python-dotenv modal secret create dots-mocr-api --from-dotenv .env
+```
+
+The OCR API refuses to start without this token. If workspace policy blocks
+URLs without Modal proxy authentication, that policy must allow this
+application-authenticated endpoint before deployment.
+
+Download the exact model revision into the persistent model Volume, then
+deploy:
+
+```bash
+uv run modal run modal_app.py::download_model
+uv run modal deploy modal_app.py
+```
+
+The deploy command prints a URL similar to:
+
+```text
+https://<workspace>--api.modal.run
+```
+
+The OCR API and bundled clients use `DOTS_MOCR_TOKEN` (or the clients' `--token`
+option). The Modal CLI's `MODAL_TOKEN_ID`/`MODAL_TOKEN_SECRET` are separate
+credentials. Never commit any of these secrets.
+
+Deployment resources and scaling settings are declared directly on
+`LayoutApiServer` in `modal_app.py`. Its snapshot hook starts and warms vLLM,
+then puts it to sleep; the restore hook wakes vLLM before Modal serves the
+FastAPI application directly through ASGI.
+
+```mermaid
+sequenceDiagram
+    participant Modal
+    participant Server as LayoutApiServer
+    participant vLLM
+
+    Note over Modal,vLLM: Once per deployment
+    Modal->>Server: enter(snap=True)
+    Server->>vLLM: start and wait for /health
+    Server->>vLLM: 3 warm-up completions (assets/warmup.jpg)
+    Server->>vLLM: POST /sleep?level=1
+    Modal->>Modal: capture CPU and GPU memory snapshot
+
+    Note over Modal,vLLM: Every later cold start
+    Modal->>Server: restore snapshot, enter(snap=False)
+    Server->>vLLM: POST /wake_up
+    Modal->>Server: route requests to the ASGI app
+```
 
 ## API
 
@@ -112,56 +304,6 @@ so browser preflight reaches the application's CORS middleware.
 Authentication runs inside the GPU container, so rejected requests can
 still incur container startup compute even though they cannot run OCR.
 
-## Deploy
-
-Install [`uv`](https://docs.astral.sh/uv/getting-started/installation/), sync the
-locked project environment, and select the intended Modal profile:
-
-```bash
-uv sync --locked
-uv run modal profile current
-```
-
-Generate a random OCR bearer token:
-
-```bash
-uv run python -c 'import secrets; print(secrets.token_urlsafe(32))'
-```
-
-Put `DOTS_MOCR_TOKEN=<generated-token>` in a private, ignored `.env` file,
-then create the OCR secret:
-
-```bash
-uv run modal secret create dots-mocr-api --from-dotenv .env
-```
-
-The OCR API refuses to start without this token. If workspace policy blocks
-URLs without Modal proxy authentication, that policy must allow this
-application-authenticated endpoint before deployment.
-
-Download the exact model revision into the persistent model Volume, then
-deploy:
-
-```bash
-uv run modal run modal_app.py::download_model
-uv run modal deploy modal_app.py
-```
-
-The deploy command prints a URL similar to:
-
-```text
-https://<workspace>--dots-mocr-serverless-api.modal.run
-```
-
-The OCR API and bundled clients use `DOTS_MOCR_TOKEN` (or the clients' `--token`
-option). The Modal CLI's `MODAL_TOKEN_ID`/`MODAL_TOKEN_SECRET` are separate
-credentials. Never commit any of these secrets.
-
-Deployment resources and scaling settings are declared directly on
-`LayoutApiServer` in `modal_app.py`. Its snapshot hook starts and warms vLLM,
-then puts it to sleep; the restore hook wakes vLLM before Modal serves the
-FastAPI application directly through ASGI.
-
 ## Concurrent client and benchmark
 
 The bundled client accepts any mixture of local PNG/JPEG paths and public HTTPS
@@ -169,7 +311,7 @@ URLs. It sends one image per request, preserves input ordering, and prints the
 complete API responses:
 
 ```bash
-export DOTS_MOCR_URL='https://<workspace>--dots-mocr-serverless-api.modal.run'
+export DOTS_MOCR_URL='https://<workspace>--api.modal.run'
 export DOTS_MOCR_TOKEN='YOUR_OCR_BEARER_TOKEN'
 
 uv run python -m scripts.batch_client \
@@ -180,35 +322,30 @@ uv run python -m scripts.batch_client \
 ```
 
 Run a concurrency sweep after deployment or after materially changing the
-workload:
+workload. Use many distinct page images: vLLM caches repeated images, so a
+sweep that cycles through a few pages overstates throughput. The sweep takes
+images in order across all levels and warns when it has to reuse them.
 
 ```bash
 uv run python -m scripts.benchmark \
   --base-url "$DOTS_MOCR_URL" \
-  --levels 8,16,32,64 \
-  assets/warmup.jpg \
-  assets/example.png
+  --levels 1,4,8,16,32,64 \
+  --output benchmark.json \
+  pages/*.png
 ```
 
-The report includes requests per second, completion tokens per second,
-p50/p95 latency, and errors.
+Each level sends `max(8, 2 × concurrency)` requests unless
+`--requests-per-level` is set. The report gives each level's ok, degraded, and
+error counts, requests per second, prompt and completion tokens per second, and
+mean, p50, p90, p95, p99, and maximum latency. `--output` also saves every
+request's start offset, latency, status, and token counts for plotting.
 
 ## Export editable Word documents
 
-The optional Word exporter combines saved OCR results and their original PNG/JPEG
-images into one `.docx`. Images and results must be supplied in the same order;
-each image becomes a separate A4 page, using portrait or landscape orientation.
-The exporter runs locally and does not call the OCR service or download models.
-
-First, save the existing batch client's output:
-
-```bash
-uv run python -m scripts.batch_client \
-  --base-url "$DOTS_MOCR_URL" \
-  page1.png page2.jpg > results.json
-```
-
-After that command succeeds, export the document:
+The optional [Word exporter](word_export/README.md) turns saved OCR results, such
+as the batch client's output, and their original page images into one editable
+`.docx`. It runs locally, uses Pandoc for content conversion, and places text,
+native tables, native equations, and cropped pictures at their source positions.
 
 ```bash
 uv run --extra word python -m word_export \
@@ -217,244 +354,11 @@ uv run --extra word python -m word_export \
   page1.png page2.jpg
 ```
 
-`--results` accepts the batch client's ordered result array, an ordered array of
-raw `/v1/parse` responses, or one raw response for one image. Use the original
-images corresponding to those results. The exporter checks result counts,
-successful OCR status, bounding boxes, and EXIF-oriented dimensions before
-writing output. Degraded results without layout elements cannot be exported.
-Dimensions cannot detect an accidental substitution of a different same-sized
-image, so preserve the input order yourself.
+![Source page with three tables beside its exported Word document](assets/screenshots/word-calibre-demo.png)
 
-The document contains editable text, native Word tables (including merged
-cells), and native Word equations. Markdown headings, emphasis, lists, and line
-breaks are retained. Pictures are cropped from the source images. Page headers
-and footers remain positioned content belonging to their respective page.
-Source proportions are preserved when fitting each page onto A4; any remaining
-space is centered around the source rectangle.
-
-Unsupported equations remain editable LaTeX. Invalid or unsupported tables
-remain editable HTML source. Warnings identify the page and region and are
-written to stderr; successful exports return exit code zero even with warnings.
-Invalid inputs or export failures return a nonzero exit code. The final file is
-replaced atomically, so a failed export does not overwrite an existing document.
-
-### Scanned and slightly rotated pages
-
-For new scans, straighten the pixels **before OCR**, then use the same corrected
-files for recognition and Word export:
-
-```bash
-uv run --extra word python -m scripts.prepare_scans \
-  --output-dir straightened page1.png page2.jpg
-
-uv run python -m scripts.batch_client \
-  --base-url "$DOTS_MOCR_URL" \
-  straightened/0001-page1.png straightened/0002-page2.png > results.json
-
-uv run --extra word python -m word_export \
-  --results results.json --output document.docx \
-  straightened/0001-page1.png straightened/0002-page2.png
-```
-
-Set `DOTS_MOCR_URL` to the deployed API URL. The batch client uses
-`DOTS_MOCR_TOKEN` as in the workflow above.
-Preparation is local, keeps input order, applies EXIF orientation, and writes
-PNG files plus an ordered `manifest.json` containing correction angles and
-coordinate transforms. It requires a new output directory and preserves the
-originals. `--angle -2` explicitly applies a clockwise two-degree correction
-when automatic estimation is uncertain; supported corrections are within ±5°.
-
-For **existing saved results**, supply the original matching images as usual.
-The exporter automatically estimates small page skew from recognized text/table
-regions, excluding pictures and explicitly rotated text. It rotates pixels and
-bounding boxes together onto an expanded canvas, then removes blank corners and
-neighboring text-line fragments from inflated text boxes. Recognized text and
-table structure remain unchanged. Corrections produce review warnings; use
-`--no-deskew` to retain the original coordinate system. Do not separately rotate
-images belonging to saved OCR results without also transforming their boxes.
-
-Detection uses consistent page rules or text baselines, with an approximately
-0.15° deadband. Sparse, conflicting or out-of-range evidence is left unchanged;
-uncertain candidate angles are reported. Preparation without OCR cannot exclude
-photographs using layout labels, so inspect its manifest and corrected images.
-Perspective distortion, curved pages, mixed tilts and OCR errors still need
-review. Export-time correction cannot recover a failed OCR response: rerun OCR
-on the prepared scan instead. Pale table rules softened by resampling get a
-lower-contrast detection pass, still requiring the semantic boundary count.
-Uncertain row measurements now warn instead of silently losing cell appearance.
-
-### Conversion engine
-
-Content conversion uses [Pandoc](https://pandoc.org/), installed with the pinned
-`pypandoc-binary` package in the `word` extra. That package bundles Pandoc 3.9,
-so exporting requires no separate Pandoc installation. Pandoc owns Markdown and
-HTML parsing, table merges, list numbering, and LaTeX-to-Word equation conversion.
-The repository's adapter validates OCR input, crops pictures, and uses
-`python-docx` plus small OOXML helpers to position Pandoc's output in text boxes.
-It does not implement another Markdown, table, or equation conversion engine.
-OCR image markup is retained as alt text; only source-image crops are embedded.
-Conversion does not fetch external resources. Pillow measures installed font
-metrics, OpenCV measures source layout, and PDFium powers the optional rendered
-checks. These maintained libraries are included in the `word` extra.
-
-Other engines considered:
-
-- [PaddleX's Word converter](https://github.com/PaddlePaddle/PaddleX/blob/develop/paddlex/inference/common/result/converter/word_converter.py)
-  supports layout reconstruction, but the inspected implementation uses flowing
-  paragraphs and does not preserve HTML row/column spans in its table parser.
-- [Docling](https://docling-project.github.io/docling/concepts/serialization/)
-  documents structured, Markdown, and HTML exports rather than a native Word
-  reconstruction exporter.
-- [pdf2docx](https://github.com/ArtifexSoftware/pdf2docx/discussions/374)
-  targets PDF input and is no longer actively maintained by Artifex.
-
-### Fidelity and verification
-
-Microsoft Word desktop is the compatibility target. The current OCR schema
-does not include fonts, line-level geometry, or exact table column widths.
-The exporter defaults to Arial and prioritizes Latin/Cyrillic text. It measures
-actual glyph advances, including bold and italic runs, and estimates font size
-and line spacing from source-image text bands. Similar body-text sizes on a page
-are kept consistent. Available whitespace below a region can accommodate font
-leading. Font substitution, significant shrinking, and likely overflow produce
-warnings; all recognized text remains in the document. Install Arial for the
-closest agreement with the default measurements, or use `--font "Liberation Sans"`
-with that same font installed on the machine rendering the document.
-
-Table rules, column boundaries, row heights and solid cell fills are recovered
-from source pixels when the measurements agree with the semantic table. Otherwise
-Pandoc's widths are retained and uncertain columns are reported. Row heights are
-minimums, allowing cells to grow; the containing text box can still overflow.
-Merged cells remain native. Detection includes light rules on shaded headers,
-merges adjacent antialiasing bands, and measures alignment over a cell's full
-row span. This avoids mistaking header text for column boundaries.
-Complex tables, especially several visual tables recognized as one table, still
-need review. Generic borders are not added where none were detected.
-
-For borderless tables, a complete set of header groups can be matched to gaps in
-the body to recover unequal column widths. If pixel measurements remain
-uncertain, columns use measured content proportions unless explicit HTML widths
-are present. Dense tables use smaller cell margins and can fit down to 4 pt;
-small text and remaining overflow produce warnings. The height estimate includes
-the actual cell margins. Inconsistent OCR row widths are reported, but recognized
-cells, values and row associations are not rewritten. Table fills require rule
-evidence so photographed paper shadows do not become arbitrary gray cells.
-
-Dark scan backgrounds use local contrast for text measurements. Small source
-text can retain sizes below 6 pt, and short single-line estimates also respect
-the available width. Low-contrast paper fragments are excluded from recovered
-graphics. These measurements remain approximate; stamps and complex picture/text
-overlaps still require review.
-
-Balanced, attribute-free `<sup>`, `<sub>`, `<u>`, `<s>`, `<del>`, `<b>`, `<strong>`,
-`<i>` and `<em>` tags become native formatting; unsupported markup stays literal.
-Nested Markdown lists retain indentation. Regular explicit dotted hierarchies
-such as `1.`, `1.1.`, `1.1.1.` become native multilevel numbering. Paragraph gaps
-are estimated when the source image and multiple paragraphs provide evidence.
-List indentation, tab stops and marker sizes are set before fitting; literal
-Unicode bullets are consumed before native markers are generated. Single-line
-font estimates account for whether the recognized letters have descenders.
-Dominant text color is sampled from the region rather than inherited from the
-Word heading style.
-Scripted ordinary math parentheses are explicitly grouped for Pandoc/LibreOffice
-compatibility. Existing sized delimiters and text commands are left intact;
-failed equations retain their original LaTeX.
-Expressions containing multiple roots carry a review warning: successful
-conversion and matching glyphs cannot establish that OCR recognized root scope
-correctly. The exporter preserves the recognized formula rather than guessing a
-different mathematical expression.
-
-Saved regions may optionally include `rotation`: `0`, `90`, `180`, or `270`
-clockwise degrees. For narrow, tall text regions without rotation metadata, the
-exporter compares recognized words with rotated glyphs and may infer a quarter
-turn, or use an adjacent confidently oriented line. Inferences are warned;
-ambiguous text stays horizontal. Dominantly Arabic/Hebrew paragraphs receive
-bidirectional paragraph settings; mixed-script fidelity still needs review.
-
-When a Picture overlaps a separately recognized text region on a clearly flat
-background, the duplicate text pixels are replaced with that background before
-the editable text is placed. Complex backgrounds remain untouched and
-produce warnings. Large Picture regions also warn that any unrecognized text
-or form fields inside remain raster content. Saved OCR alone cannot recover
-editable fields that recognition omitted.
-
-Additional substantial graphics are detected automatically. Existing Picture,
-Table and Formula regions are excluded. Edge graphics can be cropped while
-narrowing overlapping text boxes; candidates that would cover other editable
-content are reported and omitted. Ambiguous residual ink is reported rather than
-rasterized. Every recovered graphic carries a classification/overlap warning.
-Use `--no-recover-graphics` to report candidates without embedding them. This is
-conservative image analysis, not another OCR model, and can miss faint, small,
-fragmented or overlapping graphics.
-
-Editing text or substituting fonts can alter wrapping and create overlaps.
-The output remains an editable approximation, not a pixel-identical reproduction.
-No automated check can establish Microsoft Word rendering fidelity.
-
-Run the integration tests against the bundled Pandoc engine:
-
-```bash
-uv run --extra word python -m unittest discover -s tests -v
-```
-
-The tests check content, equations, table merges, image crops, page sections,
-coordinates, fallbacks, input errors, and atomic output. They do not run
-Microsoft Word. Before relying on visual fidelity, open a representative export
-in desktop Word, confirm it opens without a repair prompt, compare its page
-count/order and region positions with the originals, and edit a paragraph,
-merged table cell, and equation. Word desktop rendering is currently unverified.
-
-### Rendered checks and repeatable regression comparisons
-
-Render an export with local LibreOffice and produce an HTML report, page overlays,
-region comparisons and JSON diagnostics:
-
-```bash
-uv run --extra word python -m scripts.check_word \
-  --document document.docx --output word-checks page1.png page2.png
-```
-
-Alternatively export the DOCX to PDF in Microsoft Word and inspect that rendering:
-
-```bash
-uv run --extra word python -m scripts.check_word \
-  --document document.docx --pdf document.pdf --renderer "Microsoft Word desktop" \
-  --output word-checks --fail-on-warnings page1.png page2.png
-```
-
-`--pdf` must be a current rendering of the supplied DOCX. The report records both
-file hashes but cannot prove that externally supplied PDFs correspond to a DOCX.
-Checks report page-count/orientation mismatches, missing or clipped text,
-characters outside text boxes, low ink overlap, and possible equation replacement
-glyphs. Character recall ignores order and additional characters; PDF font
-encodings can cause false positives. Ink F1 measures dark-pixel overlap with
-3 pixels of tolerance at 150 DPI; it is not a percentage of fidelity. Low overlap
-is flagged below `--min-ink-f1` (default 0.4). These are review aids, not proof of
-correct equations or absence of clipping. Exit code 2 means findings when
-`--fail-on-warnings` is set, 1 means a tool/input failure, and 0 means completion.
-
-Replay the saved 11-page sample corpus without new inference requests:
-
-```bash
-uv run --extra word python -m scripts.word_roundtrip \
-  --samples .cache/word-roundtrip-2026-10-03 \
-  --output .cache/word-improved-2026-10-03
-```
-
-The default `all` phase exports, renders with local LibreOffice, and compares.
-For an external renderer use `--phase export`, render the files in the output's
-`reconstructed/` directory, then run `--phase check --renderer "renderer version"`.
-Use `--pdf-directory` when those PDFs are elsewhere. Existing baseline files are
-preserved; the output must be a separate directory. The command returns 2 for a
-page-count regression, a drop greater than 1 percentage point in source-word
-recall, or a drop greater than 3 points in mean ink F1. Mean scores can hide local
-regressions, so inspect the linked page/region reports as well.
-
-A corpus contains `selection.json` (ordered objects with `name` and `image`),
-`ocr/NAME.json` (saved batch results), `originals/NAME.pdf` (reference rendering),
-and optional `reconstructed/NAME.docx` plus `.pdf` (previous exporter baseline).
-The downloaded samples and saved OCR are local artifacts, not bundled test data.
-The source URLs and hashes are recorded in `tests/fixtures/word-roundtrip-sources.json`.
+See the [Word exporter guide](word_export/README.md) for the full workflow,
+scanned and rotated pages, the conversion engine, fidelity limits, and rendered
+checks.
 
 ## Runtime and security
 
@@ -462,8 +366,9 @@ The source URLs and hashes are recorded in `tests/fixtures/word-roundtrip-source
   per replica.
 - Model revision `e539fbb52280393adc081b289ec597430a0f9031` is stored under
   `/models/DotsMOCR-e539fbb5` in a persistent Modal Volume.
-- Modal targets 32 concurrent inputs per replica and permits bursts to 64;
-  additional demand scales horizontally up to a hard limit of two replicas.
+- Each replica accepts at most 32 concurrent inputs, which is also vLLM's
+  batch limit. Additional demand scales horizontally up to a hard limit of two
+  replicas; requests beyond 64 wait in Modal's queue.
 - Replicas scale to zero after 30 idle seconds. No buffer replica is kept
   warm while the service is active.
 - The Modal Function timeout and bundled client timeout are 15 minutes.

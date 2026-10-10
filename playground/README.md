@@ -4,6 +4,8 @@ A standalone static frontend for testing the deployed dots.mocr OCR API.
 GitHub Pages serves the UI; the browser calls Modal directly with a bearer
 token.
 
+![OCR Studio showing equations recognized as LaTeX Markdown](../assets/screenshots/studio-formulas.png)
+
 ## Run locally
 
 ```bash
