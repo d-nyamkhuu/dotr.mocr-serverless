@@ -207,7 +207,7 @@ class LayoutApiServer:
         post_vllm("/wake_up")
         wait_for_vllm(self.vllm_process, timeout_seconds=5 * MINUTES)
 
-    @modal.asgi_app(label="api", requires_proxy_auth=False)
+    @modal.asgi_app(label="dots-mocr", requires_proxy_auth=False)
     def serve(self):
         from layout_api import create_app
 

@@ -180,7 +180,7 @@ export default function App() {
                       endpoint: event.target.value,
                     })
                   }
-                  placeholder="https://workspace--api.modal.run"
+                  placeholder="https://workspace--dots-mocr.modal.run"
                   autoComplete="off"
                   spellCheck={false}
                   required

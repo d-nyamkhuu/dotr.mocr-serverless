@@ -212,7 +212,7 @@ uv run modal deploy modal_app.py
 The deploy command prints a URL similar to:
 
 ```text
-https://<workspace>--api.modal.run
+https://<workspace>--dots-mocr.modal.run
 ```
 
 The OCR API and bundled clients read the bearer token only from
@@ -346,7 +346,7 @@ order, and writes the complete API responses to `--output` (or prints them when
 (override with `--base-url`) and the token from `DOTS_MOCR_TOKEN`:
 
 ```bash
-export DOTS_MOCR_URL='https://<workspace>--api.modal.run'
+export DOTS_MOCR_URL='https://<workspace>--dots-mocr.modal.run'
 export DOTS_MOCR_TOKEN='YOUR_OCR_BEARER_TOKEN'
 
 uv run python -m scripts.batch_client \
