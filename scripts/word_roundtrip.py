@@ -11,15 +11,18 @@ import argparse
 import html
 import json
 import re
+import sys
 import unicodedata
 from collections import Counter
+from collections.abc import Sequence
 from contextlib import closing
 from pathlib import Path
 
 import pypdfium2 as pdfium
 
 from scripts.check_word import compare_document, render_word
-from word_export.export import export_word, load_pages
+from word_export.export import export_word
+from word_export.pages import load_pages
 
 
 def pdf_words(path: Path) -> Counter:
@@ -39,7 +42,23 @@ def score(report: dict, original: Path, rendered: Path) -> dict:
             "pages": report["rendered_pages"], "findings": report["warning_count"]}
 
 
-def replay(samples: Path, output: Path, phase: str, pdf_directory: Path | None = None,
+def write_report(summary: dict, output: Path, renderer: str) -> None:
+    parts = ['<!doctype html><meta charset="utf-8"><title>Word exporter regression comparison</title><style>body{font:16px system-ui;max-width:1100px;margin:40px auto}td,th{padding:12px;border:1px solid #ddd}table{border-collapse:collapse}p{line-height:1.6}</style><h1>Word exporter regression comparison</h1>',
+             f'<p>Renderer: {html.escape(renderer)}. Both versions scored with the same PDFium rasterizer and 3-pixel ink tolerance at 150 DPI. Original page images are fitted to A4.</p>',
+             '<p>Ink F1 is a layout diagnostic, not a percentage of fidelity. Source-word recall ignores word order, added words, and equation meaning. Findings are heuristic and require visual review. Microsoft Word desktop validation remains pending.</p>',
+             '<table><tr><th>Sample</th><th>Pages</th><th>Ink F1 before → after</th><th>Word recall before → after</th><th>Reports</th></tr>']
+    for name, result in summary['documents'].items():
+        current = result['improved']
+        before = result.get('baseline', {})
+        ink_before = f'{before["mean_ink_f1"]:.1%}' if before else '—'
+        words_before = f'{before["source_word_recall"]:.1%}' if before else '—'
+        parts.append(f'<tr><td>{name}</td><td>{current["pages"]}</td><td>{ink_before} → {current["mean_ink_f1"]:.1%}</td><td>{words_before} → {current["source_word_recall"]:.1%}</td><td><a href="checks/improved/{name}/report.html">Improved</a> · <a href="checks/baseline/{name}/report.html">Baseline</a> · <a href="reconstructed/{name}.docx">Word file</a></td></tr>')
+    parts.append('</table><h2>Regression checks</h2>')
+    parts.append('<p>' + html.escape('; '.join(summary['regressions']) or 'No page-count, text-retention, or mean ink-overlap regression against the saved baseline.') + '</p>')
+    output.write_text(''.join(parts), encoding='utf-8')
+
+
+def replay(samples: Path, output: Path, *, phase: str = "all", pdf_directory: Path | None = None,
            renderer: str = "externally supplied PDF") -> dict:
     if samples.resolve() == output.resolve() or samples.resolve() in output.resolve().parents:
         raise ValueError("Use a separate output directory to preserve the saved baseline")
@@ -80,34 +99,24 @@ def replay(samples: Path, output: Path, phase: str, pdf_directory: Path | None =
         print(f'{name}: {current["pages"]} pages, ink F1 {current["mean_ink_f1"]:.1%}, words {current["source_word_recall"]:.1%}, {current["findings"]} findings', flush=True)
     if phase != 'export':
         (output / 'summary.json').write_text(json.dumps(summary, indent=2), encoding='utf-8')
-        parts = ['<!doctype html><meta charset="utf-8"><title>Word exporter regression comparison</title><style>body{font:16px system-ui;max-width:1100px;margin:40px auto}td,th{padding:12px;border:1px solid #ddd}table{border-collapse:collapse}p{line-height:1.6}</style><h1>Word exporter regression comparison</h1>',
-                 f'<p>Renderer: {html.escape(renderer)}. Both versions scored with the same PDFium rasterizer and 3-pixel ink tolerance at 150 DPI. Original page images are fitted to A4.</p>',
-                 '<p>Ink F1 is a layout diagnostic, not a percentage of fidelity. Source-word recall ignores word order, added words, and equation meaning. Findings are heuristic and require visual review. Microsoft Word desktop validation remains pending.</p>',
-                 '<table><tr><th>Sample</th><th>Pages</th><th>Ink F1 before → after</th><th>Word recall before → after</th><th>Reports</th></tr>']
-        for name, result in summary['documents'].items():
-            current = result['improved']
-            before = result.get('baseline', {})
-            ink_before = f'{before["mean_ink_f1"]:.1%}' if before else '—'
-            words_before = f'{before["source_word_recall"]:.1%}' if before else '—'
-            parts.append(f'<tr><td>{name}</td><td>{current["pages"]}</td><td>{ink_before} → {current["mean_ink_f1"]:.1%}</td><td>{words_before} → {current["source_word_recall"]:.1%}</td><td><a href="checks/improved/{name}/report.html">Improved</a> · <a href="checks/baseline/{name}/report.html">Baseline</a> · <a href="reconstructed/{name}.docx">Word file</a></td></tr>')
-        parts.append('</table><h2>Regression checks</h2>')
-        parts.append('<p>' + html.escape('; '.join(summary['regressions']) or 'No page-count, text-retention, or mean ink-overlap regression against the saved baseline.') + '</p>')
-        (output / 'report.html').write_text(''.join(parts), encoding='utf-8')
+        write_report(summary, output / 'report.html', renderer)
     return summary
 
 
-def main() -> int:
+def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--samples', required=True, type=Path)
     parser.add_argument('--output', required=True, type=Path)
     parser.add_argument('--phase', choices=['export', 'check', 'all'], default='all')
     parser.add_argument('--pdf-directory', type=Path, help='Use already rendered PDFs instead of running local LibreOffice')
     parser.add_argument('--renderer', default='externally supplied PDF')
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     try:
-        result = replay(args.samples, args.output, args.phase, args.pdf_directory, args.renderer)
+        result = replay(args.samples, args.output, phase=args.phase, pdf_directory=args.pdf_directory,
+                        renderer=args.renderer)
     except (OSError, ValueError, KeyError, pdfium.PdfiumError) as exc:
-        parser.exit(1, f'Error: {exc}\n')
+        print(f'Error: {exc}', file=sys.stderr)
+        return 1
     return 2 if result['regressions'] else 0
 
 

@@ -19,7 +19,6 @@ First, save the existing batch client's output:
 
 ```bash
 uv run python -m scripts.batch_client \
-  --base-url "$DOTS_MOCR_URL" \
   --output results.json page1.png page2.jpg
 ```
 
@@ -70,11 +69,10 @@ For new scans, straighten the pixels **before OCR**, then use the same corrected
 files for recognition and Word export:
 
 ```bash
-uv run --extra word python -m scripts.prepare_scans \
-  --output-dir straightened page1.png page2.jpg
+uv run --extra word python -m word_export.prepare \
+  --output straightened page1.png page2.jpg
 
 uv run python -m scripts.batch_client \
-  --base-url "$DOTS_MOCR_URL" \
   --output results.json straightened/0001-page1.png straightened/0002-page2.png
 
 uv run --extra word python -m word_export \

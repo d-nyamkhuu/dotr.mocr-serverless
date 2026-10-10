@@ -10,11 +10,12 @@ import os
 import statistics
 import sys
 import time
+from collections.abc import Sequence
 from pathlib import Path
 
 import httpx
 
-from scripts.batch_client import BatchResult, build_client, send_one
+from scripts.batch_client import BatchResult, build_client, connection, send_one
 
 
 def percentile(values: list[float], percentile_value: float) -> float:
@@ -88,7 +89,7 @@ def summarize(level: int, records: list[dict[str, object]]) -> dict[str, object]
     }
 
 
-async def async_main(args: argparse.Namespace) -> int:
+async def run(args: argparse.Namespace, *, base_url: str, token: str) -> int:
     # vLLM caches repeated prompts and images, so a repeated page skips most of
     # its prefill. Take images in order across the whole run to avoid repeats.
     position = 0
@@ -107,7 +108,7 @@ async def async_main(args: argparse.Namespace) -> int:
 
     summaries: list[dict[str, object]] = []
     records: list[dict[str, object]] = []
-    async with build_client(base_url=args.base_url, token=args.token, timeout=args.timeout) as client:
+    async with build_client(base_url=base_url, token=token, timeout=args.timeout) as client:
         if not args.no_warmup:
             await run_level(client, take(1), 1)
         for level, count in zip(args.levels, request_counts):
@@ -122,21 +123,18 @@ async def async_main(args: argparse.Namespace) -> int:
     return 1 if any(summary["errors"] for summary in summaries) else 0
 
 
-def parser() -> argparse.ArgumentParser:
-    arg_parser = argparse.ArgumentParser(description=__doc__)
-    arg_parser.add_argument("images", nargs="+", help="Representative image paths or URLs, ideally all distinct")
-    arg_parser.add_argument("--base-url", required=True)
-    arg_parser.add_argument("--levels", type=parse_levels, default=parse_levels("8,16,32,64"))
-    arg_parser.add_argument("--requests-per-level", type=int)
-    arg_parser.add_argument("--timeout", type=float, default=900.0)
-    arg_parser.add_argument("--no-warmup", action="store_true")
-    arg_parser.add_argument("--output", type=Path, help="Also write summaries and per-request records as JSON")
-    arg_parser.add_argument("--token", default=os.getenv("DOTS_MOCR_TOKEN"))
-    return arg_parser
-
-
-def main() -> int:
-    return asyncio.run(async_main(parser().parse_args()))
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("images", nargs="+", help="Representative image paths or URLs, ideally all distinct")
+    parser.add_argument("--base-url", default=os.getenv("DOTS_MOCR_URL"), help="Deployed API URL (default: $DOTS_MOCR_URL)")
+    parser.add_argument("--levels", type=parse_levels, default=parse_levels("8,16,32,64"))
+    parser.add_argument("--requests-per-level", type=int)
+    parser.add_argument("--timeout", type=float, default=900.0)
+    parser.add_argument("--no-warmup", action="store_true")
+    parser.add_argument("--output", type=Path, help="Also write summaries and per-request records as JSON")
+    args = parser.parse_args(argv)
+    base_url, token = connection(parser, args)
+    return asyncio.run(run(args, base_url=base_url, token=token))
 
 
 if __name__ == "__main__":

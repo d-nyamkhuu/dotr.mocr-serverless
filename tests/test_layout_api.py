@@ -18,6 +18,8 @@ class LayoutApiTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         with patch.dict(os.environ, {"DOTS_MOCR_TOKEN": "test-token"}):
             self.app = create_app()
+        # ASGITransport does not run the lifespan that creates the model client.
+        self.app.state.http_client = None
         self.client = httpx.AsyncClient(
             transport=httpx.ASGITransport(app=self.app), base_url="https://ocr.modal.run",
         )
@@ -55,6 +57,28 @@ class LayoutApiTests(unittest.IsolatedAsyncioTestCase):
             response = await self.client.get(path)
             self.assertEqual(response.status_code, 401)
 
+    async def test_docs_and_schema_are_not_served(self):
+        for path in ["/docs", "/redoc", "/openapi.json"]:
+            response = await self.client.get(path, headers={"Authorization": "Bearer test-token"})
+            self.assertEqual(response.status_code, 404)
+
+    async def test_model_failure_maps_to_bad_gateway(self):
+        image = io.BytesIO()
+        Image.new("RGB", (72, 144), "white").save(image, format="PNG")
+        transport = httpx.MockTransport(lambda request: httpx.Response(500))
+        async with httpx.AsyncClient(transport=transport) as model_client:
+            self.app.state.http_client = model_client
+            response = await self.client.post("/v1/parse", headers={"Authorization": "Bearer test-token"},
+                                              files={"file": ("page.png", image.getvalue(), "image/png")})
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(response.json()["detail"], "The model request failed")
+
+    async def test_private_image_url_is_rejected(self):
+        response = await self.client.post("/v1/parse", headers={"Authorization": "Bearer test-token"},
+                                          data={"image_url": "https://127.0.0.1/page.png"})
+        self.assertEqual(response.status_code, 422)
+        self.assertIn("private or reserved", response.json()["detail"])
+
     async def test_valid_token_reaches_validation_and_errors_have_cors_headers(self):
         response = await self.client.post("/v1/parse", headers={
             "Authorization": "bearer test-token", "Origin": "https://any.example",
@@ -70,7 +94,6 @@ class LayoutApiTests(unittest.IsolatedAsyncioTestCase):
             "choices": [{"message": {"content": '[{"bbox":[0,0,28,28],"category":"Text","text":"Read text"}]'}, "finish_reason": "stop"}],
             "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
         }
-        self.app.state.http_client = None
         with patch("layout_api.run_inference", new_callable=AsyncMock, return_value=model_response) as inference:
             response = await self.client.post("/v1/parse", headers={
                 "Authorization": "Bearer test-token", "Origin": "https://any.example",
@@ -92,7 +115,6 @@ class LayoutApiTests(unittest.IsolatedAsyncioTestCase):
             (gif.getvalue(), 415),
             (b"0" * (layout_api.MAX_UPLOAD_BYTES + 1), 413),
         ]
-        self.app.state.http_client = None
         with patch("layout_api.run_inference", new_callable=AsyncMock) as inference:
             for content, status in cases:
                 response = await self.client.post("/v1/parse", headers=headers, files={"file": ("page", content)})

@@ -17,14 +17,10 @@ from docx.shared import Mm
 from lxml import etree
 from PIL import Image, ImageDraw, ImageFont
 
-from word_export.export import (
-    estimated_height,
-    export_word,
-    load_pages,
-    region_geometry,
-)
+from word_export.export import estimated_height, export_word, region_geometry
+from word_export.pages import load_pages
 from word_export.content import normalize_math, normalize_table
-from word_export.layout import FontMetrics, missing_graphics, source_font_size
+from word_export.measure import FontMetrics, missing_graphics, source_font_size
 
 NS = {
     "w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
@@ -389,7 +385,7 @@ class WordExportTests(unittest.TestCase):
             self.assertEqual(paragraph.xpath('./w:r/w:rPr/w:sz/@w:val', namespaces=NS), [size])
 
     def test_light_merged_header_geometry(self):
-        from word_export.layout import table_geometry
+        from word_export.measure import table_geometry
         image = Image.new('RGB', (500, 206), 'white')
         draw = ImageDraw.Draw(image)
         draw.rectangle((5, 5, 494, 75), fill='#A0A0A0')
@@ -405,7 +401,7 @@ class WordExportTests(unittest.TestCase):
         self.assertAlmostEqual(geometry.rows[1], 50, delta=3)
 
     def test_rotated_text_inference_and_explicit_direction(self):
-        from word_export.layout import text_rotation
+        from word_export.measure import text_rotation
         metrics = FontMetrics()
         font = ImageFont.truetype(metrics.paths[False, False], 26)
         line = Image.new('RGB', (250, 45), 'white')
@@ -428,7 +424,7 @@ class WordExportTests(unittest.TestCase):
                 load_pages(response(elements=[item]), [self.image])
 
     def test_combined_table_keeps_header_column_fallback(self):
-        from word_export.layout import table_geometry
+        from word_export.measure import table_geometry
         metrics = FontMetrics()
         image = Image.new('RGB', (500, 300), 'white')
         draw = ImageDraw.Draw(image)
@@ -446,7 +442,7 @@ class WordExportTests(unittest.TestCase):
         self.assertAlmostEqual(geometry.columns[1], 125, delta=5)
 
     def test_white_source_letters_remain_visible_without_background(self):
-        from word_export.layout import text_color
+        from word_export.measure import text_color
         metrics = FontMetrics()
         image = Image.new('RGB', (240, 50), 'red')
         ImageDraw.Draw(image).text((5, 5), 'Header date', font=ImageFont.truetype(metrics.paths[False, False], 24), fill='white')
@@ -524,7 +520,7 @@ class WordExportTests(unittest.TestCase):
             self.assertAlmostEqual(size, 14, delta=1)
 
     def test_borderless_table_uses_centered_headers_and_body_gaps(self):
-        from word_export.layout import table_geometry
+        from word_export.measure import table_geometry
         image = Image.new('RGB', (900, 400), '#cecece')
         draw = ImageDraw.Draw(image)
         font = ImageFont.truetype(FontMetrics().paths[False, False], 16)

@@ -180,13 +180,13 @@ def download_model() -> dict[str, str | bool]:
         VLLM_CACHE_PATH: vllm_cache_volume,
     },
 )
-@modal.concurrent(max_inputs=MAX_INPUTS, target_inputs=32)
+@modal.concurrent(max_inputs=MAX_INPUTS, target_inputs=MAX_INPUTS)
 class LayoutApiServer:
     """Snapshot-aware private vLLM with a public ASGI layout API."""
 
     @modal.enter(snap=True)
     def prepare_snapshot(self) -> None:
-        from layout_api import prepare_image
+        from layout_api import build_inference_request
 
         if not (MODEL_PATH / "config.json").exists():
             raise RuntimeError(
@@ -196,7 +196,7 @@ class LayoutApiServer:
 
         self.vllm_process = subprocess.Popen(build_vllm_command())
         wait_for_vllm(self.vllm_process, timeout_seconds=25 * MINUTES)
-        _, payload = prepare_image(Path("/warmup.jpg").read_bytes())
+        _, payload = build_inference_request(Path("/warmup.jpg").read_bytes())
         payload["max_completion_tokens"] = 16
         for _ in range(3):
             post_vllm("/v1/chat/completions", payload=payload)

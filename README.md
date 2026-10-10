@@ -215,8 +215,9 @@ The deploy command prints a URL similar to:
 https://<workspace>--api.modal.run
 ```
 
-The OCR API and bundled clients use `DOTS_MOCR_TOKEN` (or the clients' `--token`
-option). The Modal CLI's `MODAL_TOKEN_ID`/`MODAL_TOKEN_SECRET` are separate
+The OCR API and bundled clients read the bearer token only from
+`DOTS_MOCR_TOKEN`, so it never appears in shell history or process listings.
+The Modal CLI's `MODAL_TOKEN_ID`/`MODAL_TOKEN_SECRET` are separate
 credentials. Never commit any of these secrets.
 
 Deployment resources and scaling settings are declared directly on
@@ -328,8 +329,9 @@ Expected errors use FastAPI's standard error response:
 }
 ```
 
-The deployment also exposes `/health`, `/metrics`, `/docs`, and
-`/openapi.json`. Every route requires `Authorization: Bearer <token>`.
+The deployment also exposes `/health` and `/metrics`. Every route requires
+`Authorization: Bearer <token>`, so the interactive docs and OpenAPI schema are
+not served.
 
 Requests may take longer than Modal's initial 150-second web interval during
 cold starts or long generations, so clients must follow redirects (`curl -L`;
@@ -340,14 +342,14 @@ enabled in the bundled client).
 The bundled client accepts any mixture of local PNG/JPEG paths, directories of
 them, and public HTTPS URLs. It sends one image per request, keeps the input
 order, and writes the complete API responses to `--output` (or prints them when
-`--output` is omitted):
+`--output` is omitted). Both clients read the endpoint from `DOTS_MOCR_URL`
+(override with `--base-url`) and the token from `DOTS_MOCR_TOKEN`:
 
 ```bash
 export DOTS_MOCR_URL='https://<workspace>--api.modal.run'
 export DOTS_MOCR_TOKEN='YOUR_OCR_BEARER_TOKEN'
 
 uv run python -m scripts.batch_client \
-  --base-url "$DOTS_MOCR_URL" \
   --concurrency 32 \
   --output ocr.json \
   pages/*.png
@@ -364,7 +366,6 @@ images in order across all levels and warns when it has to reuse them.
 
 ```bash
 uv run python -m scripts.benchmark \
-  --base-url "$DOTS_MOCR_URL" \
   --levels 1,4,8,16,32,64 \
   --output benchmark.json \
   pages/*.png
@@ -405,8 +406,9 @@ uv run python -m unittest discover -s tests
 
 - `layout_api.py`: the FastAPI service that runs inside each GPU container.
 - `modal_app.py`: Modal images, model download, and the snapshot-aware server.
-- `word_export/`: the Word exporter library (`python -m word_export`).
-- `scripts/`: the batch client, benchmark, scan preparation, and Word checks.
+- `word_export/`: the Word exporter (`python -m word_export`) and scan
+  preparation (`python -m word_export.prepare`).
+- `scripts/`: the batch client, benchmark, and Word rendering checks.
 - `playground/`: OCR Studio, the static test frontend.
 
 ## Model license and acceptable use

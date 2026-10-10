@@ -12,7 +12,7 @@ import shutil
 import sys
 import tempfile
 
-from word_export.export import load_image
+from word_export.pages import load_image
 from word_export.scan import estimate_skew, rotate_scan
 
 
@@ -61,20 +61,20 @@ def prepare_scans(paths: Sequence[Path], output: Path, *, angle: float | None = 
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(prog="python -m word_export.prepare", description=__doc__)
     parser.add_argument("images", nargs="+", type=Path)
-    parser.add_argument("--output-dir", required=True, type=Path, help="New directory for corrected PNGs and manifest.json")
+    parser.add_argument("--output", required=True, type=Path, help="New directory for corrected PNGs and manifest.json")
     parser.add_argument("--angle", type=float, help="Override automatic estimation; counterclockwise correction in degrees (±5)")
     args = parser.parse_args(argv)
     try:
-        records = prepare_scans(args.images, args.output_dir, angle=args.angle)
+        records = prepare_scans(args.images, args.output, angle=args.angle)
     except (ValueError, OSError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
     for record in records:
         if not record["confident"]:
             print(f'Warning: {record["image"]}: {record["reason"]}; no rotation applied', file=sys.stderr)
-        print(args.output_dir / record["image"])
+        print(args.output / record["image"])
     return 0
 
 

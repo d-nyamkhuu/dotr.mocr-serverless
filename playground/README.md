@@ -44,7 +44,7 @@ without the token. CORS permits any origin, `GET`/`POST`, and the
 Every HTTP route still requires the bearer token except CORS preflight.
 
 Use the [root deployment instructions](../README.md#deploy) to create the
-token. The batch and benchmark clients accept `--token` or `DOTS_MOCR_TOKEN`.
+token. The batch and benchmark clients read it from `DOTS_MOCR_TOKEN`.
 
 ## GitHub Pages
 

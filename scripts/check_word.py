@@ -13,9 +13,11 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import unicodedata
 from collections import Counter
+from collections.abc import Sequence
 from contextlib import closing
 from pathlib import Path
 from zipfile import ZipFile
@@ -26,7 +28,8 @@ import pypdfium2 as pdfium
 from lxml import etree
 from PIL import Image
 
-from word_export.export import EMU_PER_POINT, load_image
+from word_export.export import EMU_PER_POINT
+from word_export.pages import load_image
 
 NS = {
     "w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
@@ -230,7 +233,7 @@ def write_report(report: dict, output: Path) -> None:
     output.write_text(''.join(parts), encoding="utf-8")
 
 
-def main() -> int:
+def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("images", nargs="+", type=Path)
     parser.add_argument("--document", required=True, type=Path)
@@ -239,7 +242,7 @@ def main() -> int:
     parser.add_argument("--output", required=True, type=Path, help="Directory for JSON, HTML and comparisons")
     parser.add_argument("--min-ink-f1", type=float, default=0.4)
     parser.add_argument("--fail-on-warnings", action="store_true")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     try:
         if args.pdf:
             report = compare_document(args.document, args.pdf, args.images, args.output,
@@ -250,10 +253,11 @@ def main() -> int:
                 renderer = render_word(args.document, pdf)
                 report = compare_document(args.document, pdf, args.images, args.output,
                                           renderer=renderer, min_ink_f1=args.min_ink_f1)
-        print(f"Saved {args.output / 'report.html'} ({report['warning_count']} findings)")
-        return 2 if args.fail_on_warnings and report["warning_count"] else 0
     except (OSError, ValueError, subprocess.SubprocessError, pdfium.PdfiumError) as exc:
-        parser.exit(1, f"Error: {exc}\n")
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    print(f"Saved {args.output / 'report.html'} ({report['warning_count']} findings)")
+    return 2 if args.fail_on_warnings and report["warning_count"] else 0
 
 
 if __name__ == "__main__":

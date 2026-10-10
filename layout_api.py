@@ -6,6 +6,7 @@ import asyncio
 import base64
 import ipaddress
 import json
+import logging
 import math
 import os
 import secrets
@@ -17,7 +18,7 @@ from typing import Annotated, Any, Literal
 from urllib.parse import urljoin, urlsplit
 
 import httpx
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from PIL import Image, ImageOps, UnidentifiedImageError
@@ -35,6 +36,8 @@ IMAGE_FACTOR = 28
 MAX_MODEL_LEN = 32_768
 MAX_COMPLETION_TOKENS = 24_000
 PROMPT_TOKEN_RESERVE = 1_024
+
+logger = logging.getLogger(__name__)
 
 LAYOUT_PROMPT = """Please output the layout information from the PDF image, including each layout element's bbox, its category, and the corresponding text content within the bbox.
 
@@ -93,7 +96,7 @@ class ParseResponse(BaseModel):
 
 
 class ImageError(ValueError):
-    """An unusable image, reported to clients with the given HTTP status."""
+    """An unusable image or image URL, reported to clients with the given HTTP status."""
 
     def __init__(self, status_code: int, detail: str):
         super().__init__(detail)
@@ -101,7 +104,11 @@ class ImageError(ValueError):
         self.detail = detail
 
 
-def smart_resize(height: int, width: int) -> tuple[int, int]:
+class ModelError(RuntimeError):
+    """The private vLLM server failed to answer an inference request."""
+
+
+def model_input_size(height: int, width: int) -> tuple[int, int]:
     if max(height, width) / min(height, width) > 200:
         raise ImageError(422, "Image aspect ratio must not exceed 200:1")
 
@@ -126,6 +133,8 @@ def image_data_url(image: Image.Image) -> str:
 
 
 def load_image(data: bytes) -> Image.Image:
+    # word_export.pages.load_image is the file-based twin; the server cannot
+    # depend on the optional word extra, so the two stay separate.
     if len(data) > MAX_UPLOAD_BYTES:
         raise ImageError(413, "Image exceeds the 20 MiB limit")
     try:
@@ -140,7 +149,7 @@ def load_image(data: bytes) -> Image.Image:
 def preprocess_image(image: Image.Image) -> Image.Image:
     """Upscale by 200/96 (96-DPI screen to 200-DPI print) within the model's pixel limits."""
     scale = min(200 / 96, math.sqrt(MAX_MODEL_PIXELS / (image.width * image.height)))
-    height, width = smart_resize(math.ceil(image.height * scale), math.ceil(image.width * scale))
+    height, width = model_input_size(math.ceil(image.height * scale), math.ceil(image.width * scale))
     return image.resize((width, height), Image.Resampling.LANCZOS)
 
 
@@ -170,7 +179,7 @@ def build_vllm_request(model_image: Image.Image) -> dict[str, Any]:
     }
 
 
-def prepare_image(data: bytes) -> tuple[ImageMetadata, dict[str, Any]]:
+def build_inference_request(data: bytes) -> tuple[ImageMetadata, dict[str, Any]]:
     with closing(load_image(data)) as original, closing(preprocess_image(original)) as model_image:
         image = ImageMetadata(
             original_width=original.width,
@@ -190,11 +199,11 @@ async def run_inference(client: httpx.AsyncClient, payload: dict[str, Any]) -> d
         )
         response.raise_for_status()
     except httpx.HTTPError as exc:
-        raise HTTPException(502, "The model request failed") from exc
+        raise ModelError("The model request failed") from exc
     return response.json()
 
 
-def normalize_elements(raw_text: str, image: ImageMetadata) -> list[LayoutElement]:
+def parse_layout_elements(raw_text: str, image: ImageMetadata) -> list[LayoutElement]:
     scale_x = image.original_width / image.model_input_width
     scale_y = image.original_height / image.model_input_height
     payload = json.loads(raw_text)
@@ -238,7 +247,7 @@ def build_parse_response(image: ImageMetadata, inference: dict[str, Any]) -> Par
     choice = inference["choices"][0]
     raw_text = choice["message"]["content"]
     try:
-        elements = normalize_elements(raw_text, image)
+        elements = parse_layout_elements(raw_text, image)
     except (ValueError, TypeError, KeyError):
         elements = None
 
@@ -262,15 +271,15 @@ async def validate_public_https_url(url: str) -> None:
     # defend against DNS rebinding. Use network egress rules for strict isolation.
     parsed = urlsplit(url)
     if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
-        raise HTTPException(422, "image_url must be a public HTTPS URL")
+        raise ImageError(422, "image_url must be a public HTTPS URL")
     try:
         addresses = await asyncio.get_running_loop().getaddrinfo(
             parsed.hostname, parsed.port or 443, type=socket.SOCK_STREAM
         )
     except (ValueError, socket.gaierror) as exc:
-        raise HTTPException(422, "image_url hostname or port is invalid") from exc
+        raise ImageError(422, "image_url hostname or port is invalid") from exc
     if not addresses or any(not ipaddress.ip_address(address[4][0]).is_global for address in addresses):
-        raise HTTPException(422, "image_url must not resolve to a private or reserved address")
+        raise ImageError(422, "image_url must not resolve to a private or reserved address")
 
 
 async def fetch_image_url(client: httpx.AsyncClient, url: str) -> bytes:
@@ -286,11 +295,18 @@ async def fetch_image_url(client: httpx.AsyncClient, url: str) -> bytes:
                 async for chunk in response.aiter_bytes(1024 * 1024):
                     data.extend(chunk)
                     if len(data) > MAX_UPLOAD_BYTES:
-                        raise HTTPException(413, "Image exceeds the 20 MiB limit")
+                        raise ImageError(413, "Image exceeds the 20 MiB limit")
                 return bytes(data)
     except httpx.HTTPError as exc:
-        raise HTTPException(422, "image_url could not be fetched") from exc
-    raise HTTPException(422, "image_url redirected too many times")
+        raise ImageError(422, "image_url could not be fetched") from exc
+    raise ImageError(422, "image_url redirected too many times")
+
+
+def get_http_client(request: Request) -> httpx.AsyncClient:
+    return request.app.state.http_client
+
+
+HttpClient = Annotated[httpx.AsyncClient, Depends(get_http_client)]
 
 
 def create_app() -> FastAPI:
@@ -304,8 +320,28 @@ def create_app() -> FastAPI:
             app.state.http_client = client
             yield
 
-    app = FastAPI(title="dots.mocr Layout API", version="1.0.0", lifespan=lifespan)
+    # Every route requires the bearer token, so the interactive docs and
+    # OpenAPI schema are not served.
+    app = FastAPI(
+        title="dots.mocr Layout API",
+        version="0.1.0",
+        lifespan=lifespan,
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+    )
 
+    @app.exception_handler(ImageError)
+    async def image_error(request: Request, exc: ImageError) -> JSONResponse:
+        return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
+
+    @app.exception_handler(ModelError)
+    async def model_error(request: Request, exc: ModelError) -> JSONResponse:
+        return JSONResponse({"detail": str(exc)}, status_code=502)
+
+    # Authentication is middleware rather than a dependency because FastAPI
+    # parses form bodies before resolving dependencies; middleware rejects
+    # unauthenticated uploads before any multipart parsing.
     @app.middleware("http")
     async def authenticate(request: Request, call_next):
         scheme, _, token = request.headers.get("authorization", "").partition(" ")
@@ -327,41 +363,44 @@ def create_app() -> FastAPI:
         allow_credentials=False,
     )
 
-    @app.post("/v1/parse", response_model=ParseResponse)
+    @app.post("/v1/parse")
     async def parse_layout(
-        request: Request,
+        client: HttpClient,
         file: Annotated[UploadFile | None, File()] = None,
         image_url: Annotated[str | None, Form()] = None,
     ) -> ParseResponse:
         if (file is None) == (image_url is None):
             raise HTTPException(422, "Provide exactly one of file or image_url")
-        client = request.app.state.http_client
         if file is not None:
             data = await file.read(MAX_UPLOAD_BYTES + 1)
         else:
             data = await fetch_image_url(client, image_url)
 
-        try:
-            image, payload = await run_in_threadpool(prepare_image, data)
-        except ImageError as exc:
-            raise HTTPException(exc.status_code, exc.detail) from exc
+        image, payload = await run_in_threadpool(build_inference_request, data)
         del data
         inference = await run_inference(client, payload)
-        return build_parse_response(image, inference)
+        response = build_parse_response(image, inference)
+        if response.status == "degraded":
+            logger.warning(
+                "Request %s returned invalid layout JSON (finish_reason=%s)",
+                response.request_id,
+                response.generation.finish_reason,
+            )
+        return response
 
     @app.get("/health")
-    async def health(request: Request) -> dict[str, str]:
+    async def health(client: HttpClient) -> dict[str, str]:
         try:
-            response = await request.app.state.http_client.get(f"{VLLM_BASE_URL}/health")
+            response = await client.get(f"{VLLM_BASE_URL}/health")
             response.raise_for_status()
         except httpx.HTTPError as exc:
             raise HTTPException(503, "The model server is unavailable") from exc
         return {"status": "ok", "model": MODEL_ID}
 
-    @app.get("/metrics", include_in_schema=False)
-    async def metrics(request: Request) -> Response:
+    @app.get("/metrics")
+    async def metrics(client: HttpClient) -> Response:
         try:
-            response = await request.app.state.http_client.get(f"{VLLM_BASE_URL}/metrics")
+            response = await client.get(f"{VLLM_BASE_URL}/metrics")
         except httpx.HTTPError as exc:
             raise HTTPException(503, "The model server is unavailable") from exc
         return Response(

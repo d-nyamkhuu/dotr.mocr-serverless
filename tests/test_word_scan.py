@@ -10,9 +10,10 @@ import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-from word_export.export import Page, Region, prepared_page
-from scripts.prepare_scans import prepare_scans, main
-from word_export.layout import FontMetrics, table_geometry, text_lines
+from word_export.export import prepared_page
+from word_export.pages import Page, Region
+from word_export.prepare import prepare_scans, main
+from word_export.measure import FontMetrics, table_geometry, text_lines
 from word_export.scan import SkewEstimate, content_box, estimate_skew, rotate_scan, transform_box
 
 
@@ -142,7 +143,7 @@ class ScanTests(unittest.TestCase):
         self.assertEqual(json.loads((output / 'manifest.json').read_text()), records)
         with self.assertRaises(ValueError):
             prepare_scans([second], output)
-        self.assertEqual(main(['--output-dir', str(self.root / 'bad'), '--angle', 'nan', str(first)]), 1)
+        self.assertEqual(main(['--output', str(self.root / 'bad'), '--angle', 'nan', str(first)]), 1)
 
     def test_pale_merged_header_rule_survives_resampling(self):
         # The short header separator is lighter than the background. Blur

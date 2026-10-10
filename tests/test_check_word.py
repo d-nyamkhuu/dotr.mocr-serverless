@@ -7,7 +7,8 @@ from pathlib import Path
 from PIL import Image
 
 from scripts.check_word import compare_document, ink_scores, render_word
-from word_export.export import export_word, load_pages
+from word_export.export import export_word
+from word_export.pages import load_pages
 
 
 def write_pdf(path: Path, texts: list[str]) -> None:

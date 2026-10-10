@@ -2,16 +2,13 @@
 
 from __future__ import annotations
 
-import argparse
-import json
 import os
-import sys
 import tempfile
 import unicodedata
 from collections.abc import Sequence
 from contextlib import contextmanager
 from copy import deepcopy
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from io import BytesIO
 from pathlib import Path
 from statistics import median
@@ -26,10 +23,10 @@ from docx.shared import Mm, Pt, RGBColor
 from docx.text.paragraph import Paragraph
 from docx.text.run import Run
 from lxml import etree
-from PIL import Image, ImageOps, UnidentifiedImageError
+from PIL import Image
 
 from word_export.content import convert_regions, dotted_list
-from word_export.layout import (
+from word_export.measure import (
     FontMetrics,
     cell_alignment,
     cell_appearance,
@@ -42,101 +39,11 @@ from word_export.layout import (
     text_rotation,
     word_tokens,
 )
+from word_export.pages import Page, Region, load_image
 from word_export.scan import content_box, estimate_skew, rotate_scan, transform_box
 
 WPS_NS = "http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
-SHAPE_URI = WPS_NS
 EMU_PER_POINT = 12700
-
-
-@dataclass
-class Region:
-    bbox: tuple[int, int, int, int]
-    category: str
-    text: str
-    label: str
-    rotation: int = 0
-
-
-@dataclass
-class Page:
-    path: Path
-    width: int
-    height: int
-    regions: list[Region]
-
-
-def load_image(path: Path) -> Image.Image:
-    try:
-        with Image.open(path) as image:
-            if image.format not in {"PNG", "JPEG"}:
-                raise ValueError(f"{path}: only PNG and JPEG images are supported")
-            oriented = ImageOps.exif_transpose(image)
-            try:
-                return oriented.convert("RGB")
-            finally:
-                oriented.close()
-    except (UnidentifiedImageError, Image.DecompressionBombError, OSError) as exc:
-        raise ValueError(f"Cannot read image {path}: {exc}") from exc
-
-
-def load_pages(payload: Any, paths: Sequence[Path]) -> list[Page]:
-    results = [payload] if isinstance(payload, dict) else payload
-    if not paths or not isinstance(results, list) or len(results) != len(paths):
-        raise ValueError("Provide exactly one OCR result per image, in the same order")
-    pages = []
-    for page_index, (entry, path) in enumerate(zip(results, paths), start=1):
-        label = f"Page {page_index}"
-        if not isinstance(entry, dict):
-            raise TypeError(f"{label}: OCR result must be an object")
-        if "response" in entry:
-            if entry.get("error") or not isinstance(entry["response"], dict):
-                raise ValueError(f"{label}: batch OCR request failed")
-            if "index" in entry and (type(entry["index"]) is not int or entry["index"] != page_index - 1):
-                raise ValueError(f"{label}: batch result indices are out of order")
-            entry = entry["response"]
-        if entry.get("status") != "ok" or not isinstance(entry.get("elements"), list):
-            raise ValueError(f"{label}: successful OCR with layout elements is required")
-        metadata = entry.get("image")
-        if not isinstance(metadata, dict):
-            raise TypeError(f"{label}: missing image dimensions")
-        with load_image(path) as image:
-            width, height = image.size
-        dimensions = (metadata.get("original_width"), metadata.get("original_height"))
-        if any(type(value) is not int for value in dimensions) or dimensions != (width, height):
-            raise ValueError(f"{label}: OCR dimensions do not match the EXIF-oriented image {width}×{height}")
-        regions = []
-        for region_index, element in enumerate(entry["elements"], start=1):
-            location = f"{label}, region {region_index}"
-            if not isinstance(element, dict):
-                raise TypeError(f"{location}: layout element must be an object")
-            bbox = element.get("bbox")
-            if not isinstance(bbox, (list, tuple)) or len(bbox) != 4 or any(
-                type(value) is not int for value in bbox
-            ):
-                raise ValueError(f"{location}: bounding box must contain four integer coordinates")
-            x1, y1, x2, y2 = bbox
-            if not (0 <= x1 < x2 <= width and 0 <= y1 < y2 <= height):
-                raise ValueError(f"{location}: bounding box is outside the image or has no area")
-            category = element.get("category")
-            text = element.get("text")
-            if not isinstance(category, str) or not category.strip():
-                raise ValueError(f"{location}: missing region category")
-            if text is None and category == "Picture":
-                text = ""
-            if not isinstance(text, str):
-                raise TypeError(f"{location}: text must be a string")
-            # XML 1.0 disallows these even though JSON permits them.
-            if any(not (char in "\t\n\r" or 0x20 <= ord(char) <= 0xD7FF
-                        or 0xE000 <= ord(char) <= 0xFFFD or 0x10000 <= ord(char) <= 0x10FFFF)
-                   for char in text):
-                raise ValueError(f"{location}: text contains characters invalid in Word XML")
-            rotation = element.get("rotation", 0)
-            if type(rotation) is not int or rotation not in {0, 90, 180, 270}:
-                raise ValueError(f"{location}: rotation must be 0, 90, 180 or 270 clockwise degrees")
-            regions.append(Region(tuple(bbox), category, text, location, rotation))
-        pages.append(Page(path, width, height, regions))
-    return pages
 
 
 @contextmanager
@@ -215,7 +122,7 @@ def page_anchor(identifier: int, label: str, geometry: tuple[int, int, int, int]
 def add_textbox(paragraph: Any, identifier: int, region: Region, geometry: tuple[int, int, int, int], nodes: list[Any]) -> None:
     anchor = page_anchor(identifier, region.label, geometry)
     graphic = xml_element("a:graphic")
-    data = xml_element("a:graphicData", uri=SHAPE_URI)
+    data = xml_element("a:graphicData", uri=WPS_NS)
     shape = etree.SubElement(data, f"{{{WPS_NS}}}wsp", nsmap={"wps": WPS_NS})
     etree.SubElement(shape, f"{{{WPS_NS}}}cNvSpPr", txBox="1")
     properties = etree.SubElement(shape, f"{{{WPS_NS}}}spPr")
@@ -862,31 +769,3 @@ def export_word(pages: Sequence[Page], output: Path, *, font: str = "Arial", rec
         finally:
             Path(name).unlink(missing_ok=True)
     return warnings
-
-
-def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="python -m word_export", description=__doc__)
-    parser.add_argument("images", nargs="+", type=Path, help="PNG/JPEG pages in document order")
-    parser.add_argument("--results", required=True, type=Path, help="Saved parse response or batch JSON")
-    parser.add_argument("--output", required=True, type=Path, help="Destination .docx file")
-    parser.add_argument("--font", default="Arial", help="Word font and installed font used for measurements (default: Arial)")
-    parser.add_argument("--no-recover-graphics", action="store_true", help="Report additional graphic candidates without embedding them")
-    parser.add_argument("--no-deskew", action="store_true", help="Disable automatic small-angle scan correction")
-    args = parser.parse_args(argv)
-    try:
-        if args.output.suffix.lower() != ".docx":
-            raise ValueError("Output filename must end in .docx")
-        if args.output.resolve() == args.results.resolve():
-            raise ValueError("Output must not overwrite the OCR results")
-        payload = json.loads(args.results.read_text(encoding="utf-8"))
-        pages = load_pages(payload, args.images)
-        warnings = export_word(pages, args.output, font=args.font, recover_graphics=not args.no_recover_graphics,
-                               deskew=not args.no_deskew)
-    except (TypeError, ValueError, OSError) as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        return 1
-    for warning in warnings:
-        print(f"Warning: {warning}", file=sys.stderr)
-    print(f"Saved {args.output} ({len(pages)} pages)")
-    return 0
-

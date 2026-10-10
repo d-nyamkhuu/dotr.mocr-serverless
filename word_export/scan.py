@@ -9,7 +9,7 @@ import cv2
 import numpy as np
 from PIL import Image
 
-from word_export.layout import text_lines
+from word_export.measure import text_lines
 
 
 @dataclass(frozen=True)

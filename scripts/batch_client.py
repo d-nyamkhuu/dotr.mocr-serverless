@@ -32,8 +32,6 @@ def build_client(
     token: str,
     timeout: float,
 ) -> httpx.AsyncClient:
-    if not token:
-        raise ValueError("An OCR bearer token is required (--token or DOTS_MOCR_TOKEN)")
     return httpx.AsyncClient(
         base_url=base_url.rstrip("/"),
         headers={"Authorization": f"Bearer {token}"},
@@ -131,44 +129,48 @@ async def send_many(
     )
 
 
-def parser() -> argparse.ArgumentParser:
-    arg_parser = argparse.ArgumentParser(description=__doc__)
-    arg_parser.add_argument(
-        "images", nargs="+", help="Local PNG/JPEG paths, directories of them, or HTTPS URLs"
-    )
-    arg_parser.add_argument("--base-url", required=True, help="Deployed Modal endpoint URL")
-    arg_parser.add_argument("--concurrency", type=int, default=32)
-    arg_parser.add_argument("--timeout", type=float, default=900.0)
-    arg_parser.add_argument("--token", default=os.getenv("DOTS_MOCR_TOKEN"))
-    arg_parser.add_argument(
-        "--output", type=Path, help="Write results to this JSON file instead of stdout"
-    )
-    return arg_parser
+def connection(parser: argparse.ArgumentParser, args: argparse.Namespace) -> tuple[str, str]:
+    """Return the API URL and bearer token, or exit with a usage error."""
+    if not args.base_url:
+        parser.error("--base-url or DOTS_MOCR_URL is required")
+    token = os.getenv("DOTS_MOCR_TOKEN", "").strip()
+    if not token:
+        parser.error("Set DOTS_MOCR_TOKEN to the OCR bearer token")
+    return args.base_url, token
 
 
-async def async_main(args: argparse.Namespace) -> int:
-    sources = expand_sources(args.images)
-    if not sources:
-        raise SystemExit("No PNG/JPEG images found")
-    async with build_client(
-        base_url=args.base_url,
-        token=args.token,
-        timeout=args.timeout,
-    ) as client:
-        results = await send_many(client, sources, concurrency=args.concurrency)
+async def run(
+    sources: list[str], *, base_url: str, token: str, timeout: float, concurrency: int, output: Path | None
+) -> int:
+    async with build_client(base_url=base_url, token=token, timeout=timeout) as client:
+        results = await send_many(client, sources, concurrency=concurrency)
 
     text = json.dumps([asdict(result) for result in results], ensure_ascii=False, indent=2)
-    if args.output:
-        args.output.write_text(text + "\n", encoding="utf-8")
-        failed = sum(1 for result in results if result.error)
-        print(f"Wrote {len(results)} results ({failed} failed) to {args.output}")
+    failed = sum(1 for result in results if result.error)
+    if output:
+        output.write_text(text + "\n", encoding="utf-8")
+        print(f"Wrote {len(results)} results ({failed} failed) to {output}")
     else:
         print(text)
-    return 1 if any(result.error for result in results) else 0
+    return 1 if failed else 0
 
 
-def main() -> int:
-    return asyncio.run(async_main(parser().parse_args()))
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("images", nargs="+", help="Local PNG/JPEG paths, directories of them, or HTTPS URLs")
+    parser.add_argument("--base-url", default=os.getenv("DOTS_MOCR_URL"), help="Deployed API URL (default: $DOTS_MOCR_URL)")
+    parser.add_argument("--concurrency", type=int, default=32)
+    parser.add_argument("--timeout", type=float, default=900.0)
+    parser.add_argument("--output", type=Path, help="Write results to this JSON file instead of stdout")
+    args = parser.parse_args(argv)
+    base_url, token = connection(parser, args)
+    if args.concurrency < 1:
+        parser.error("--concurrency must be at least 1")
+    sources = expand_sources(args.images)
+    if not sources:
+        parser.error("No PNG/JPEG images found")
+    return asyncio.run(run(sources, base_url=base_url, token=token, timeout=args.timeout,
+                           concurrency=args.concurrency, output=args.output))
 
 
 if __name__ == "__main__":
