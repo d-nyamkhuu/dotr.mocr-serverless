@@ -389,7 +389,11 @@ def text_color(image: Image.Image) -> tuple[int, int, int] | None:
     dominant = colors[counts.argmax()]
     solid = foreground[np.all(foreground // 16 == dominant, axis=1)]
     color = np.median(solid, axis=0)
-    if (np.max(np.abs(foreground - color), axis=1) < 48).mean() < 0.6:
+    # Anti-aliased edges blend the text color into the background; count them as text.
+    direction = color - background
+    blend = np.clip((foreground - background) @ direction / max(direction @ direction, 1), 0, 1)
+    residual = np.max(np.abs(foreground - background - blend[:, None] * direction), axis=1)
+    if (residual < 48).mean() < 0.6:
         return None  # Mixed colors cannot be assigned reliably without span boxes.
     if color.mean() > 220:
         return (0, 0, 0)  # White source lettering needs a background we cannot infer.
