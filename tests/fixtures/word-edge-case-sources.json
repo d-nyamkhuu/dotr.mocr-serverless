@@ -1,0 +1,160 @@
+{
+  "date": "2026-10-03",
+  "method": "DOCX → LibreOffice PDF → 150-DPI images → deployed OCR → frozen Word exporter → LibreOffice PDF; manual inspection of all selected pages",
+  "renderer": "LibreOffice 7.4.7.2",
+  "microsoft_word_validation": "pending",
+  "documents": [
+    {
+      "name": "cyrillic-calendar",
+      "url": "https://raw.githubusercontent.com/apache/poi/trunk/test-data/document/bib-chernigovka.netdo.ru_download_docs_17459.docx",
+      "source_page": "https://github.com/apache/poi/blob/trunk/test-data/document/bib-chernigovka.netdo.ru_download_docs_17459.docx",
+      "git_blob_sha": "e62c2ef39fe58b4324b22cac0abacfa9ca4f1ae9",
+      "sha256": "74575caabe35de9982ed11328ebe556844fcd3da2fed1e425255bfe81dee4c50",
+      "reason": "Cyrillic prose and dense date table; first three rendered pages selected before OCR",
+      "rendered_source_pages": 15,
+      "selected_source_pages": [
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "name": "landscape-newsletter",
+      "url": "https://raw.githubusercontent.com/LibreOffice/core/master/sw/qa/extras/ooxmlexport/data/tdf104061_tableSectionColumns.docx",
+      "source_page": "https://github.com/LibreOffice/core/blob/master/sw/qa/extras/ooxmlexport/data/tdf104061_tableSectionColumns.docx",
+      "git_blob_sha": "b5d2a4fee9ed921f2cd7e4e91455f3501129a5a4",
+      "sha256": "1036c4c117b0260d53da6248ad7f65aba39f0d7eb1c42ffc0b01565c27b25eb9",
+      "reason": "Landscape, columns, tables and illustrations",
+      "rendered_source_pages": 3,
+      "selected_source_pages": [
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "name": "page-headers-footers",
+      "url": "https://raw.githubusercontent.com/apache/poi/trunk/test-data/document/PageSpecificHeadFoot.docx",
+      "source_page": "https://github.com/apache/poi/blob/trunk/test-data/document/PageSpecificHeadFoot.docx",
+      "git_blob_sha": "13097b9901f947e6ae14fc108db23a1e04dc365f",
+      "sha256": "90bb8251b18c9f94e0b8fb91192413922a09dbe418a4a210116221054378eaad",
+      "reason": "Different header/footer layouts across pages",
+      "rendered_source_pages": 2,
+      "selected_source_pages": [
+        1,
+        2
+      ]
+    },
+    {
+      "name": "visa-form-footnotes",
+      "url": "https://raw.githubusercontent.com/apache/poi/trunk/test-data/document/form_footnotes.docx",
+      "source_page": "https://github.com/apache/poi/blob/trunk/test-data/document/form_footnotes.docx",
+      "git_blob_sha": "70abb60c9a8f1676e5a2669e32fa1811385b248d",
+      "sha256": "a890294bfbdc63f6d03eab61efc1e98cb51d59f0920541150dd7082f9bdf31f1",
+      "reason": "Dense form, empty cells, checkboxes and footnotes",
+      "rendered_source_pages": 3,
+      "selected_source_pages": [
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "name": "complex-numbering",
+      "url": "https://raw.githubusercontent.com/apache/poi/trunk/test-data/document/ComplexNumberedLists.docx",
+      "source_page": "https://github.com/apache/poi/blob/trunk/test-data/document/ComplexNumberedLists.docx",
+      "git_blob_sha": "b4409c9d1595df7001e18a5bccf783fb20d73611",
+      "sha256": "297a085a7d433af2eeee7661e8db21539452cb585096484774a1e9f5f258b0b6",
+      "reason": "Nested numbering, restarts, interruptions and continuation",
+      "rendered_source_pages": 1,
+      "selected_source_pages": [
+        1
+      ]
+    },
+    {
+      "name": "merged-header-table",
+      "url": "https://raw.githubusercontent.com/jgm/pandoc/main/test/docx/table_header_rowspan.docx",
+      "source_page": "https://github.com/jgm/pandoc/blob/main/test/docx/table_header_rowspan.docx",
+      "git_blob_sha": "1cc32a10552305bbc60e1735f96b9782ee15a949",
+      "sha256": "e5a1c8507b9d33fa884bde402de7d7f11531f55efc96b2a1da4ec1f8b4b60792",
+      "reason": "Merged header cells and repeated numeric rows",
+      "rendered_source_pages": 1,
+      "selected_source_pages": [
+        1
+      ]
+    },
+    {
+      "name": "rotated-text",
+      "url": "https://raw.githubusercontent.com/LibreOffice/core/master/sw/qa/extras/ooxmlexport/data/TextFrameRotation.docx",
+      "source_page": "https://github.com/LibreOffice/core/blob/master/sw/qa/extras/ooxmlexport/data/TextFrameRotation.docx",
+      "git_blob_sha": "ac7c2236bf2310ab2fce328e5bc142c8e91536c4",
+      "sha256": "a1aa85b7f81d5adaaed033695bd8275cf97c8985b197cdb88fce83eb034d289d",
+      "reason": "Rotated text in positioned shapes",
+      "rendered_source_pages": 1,
+      "selected_source_pages": [
+        1
+      ],
+      "source_rendering_limitation": "LibreOffice renders this fixture blank despite text in its DOCX XML; exclude from fidelity conclusions."
+    },
+    {
+      "name": "math-matrices",
+      "url": "https://raw.githubusercontent.com/LibreOffice/core/master/sw/qa/extras/ooxmlexport/data/math-matrix.docx",
+      "source_page": "https://github.com/LibreOffice/core/blob/master/sw/qa/extras/ooxmlexport/data/math-matrix.docx",
+      "git_blob_sha": "d6b5b1871a69f0fb6764feb698db9e1e122adf2b",
+      "sha256": "dd84c0d6d5d392007adab77944d3e2d0a87558b881b4b97d86682a539d781c63",
+      "reason": "Editable mathematical matrix",
+      "rendered_source_pages": 1,
+      "selected_source_pages": [
+        1
+      ]
+    },
+    {
+      "name": "math-radicals",
+      "url": "https://raw.githubusercontent.com/LibreOffice/core/master/sw/qa/extras/ooxmlexport/data/math-rad.docx",
+      "source_page": "https://github.com/LibreOffice/core/blob/master/sw/qa/extras/ooxmlexport/data/math-rad.docx",
+      "git_blob_sha": "39194dcca2dca6b3568a9e6719b891d37ac23022",
+      "sha256": "6aeb7a5343166ebb0687228295633a23902cc44f20e2aac69f7a06d06c377862",
+      "reason": "Square and indexed roots",
+      "rendered_source_pages": 1,
+      "selected_source_pages": [
+        1
+      ]
+    },
+    {
+      "name": "rtl-arabic",
+      "url": "https://raw.githubusercontent.com/apache/poi/trunk/test-data/document/rtl.docx",
+      "source_page": "https://github.com/apache/poi/blob/trunk/test-data/document/rtl.docx",
+      "git_blob_sha": "6a60dce72c69f11f9289992e10fe8ccc6ce64f48",
+      "sha256": "d159b6ac6734f14a9ecf8e97ca5029bdcddbfae2d33ba0128aa774924e0b190d",
+      "reason": "Right-to-left Arabic with inline Latin; beyond Latin/Cyrillic priority",
+      "rendered_source_pages": 1,
+      "selected_source_pages": [
+        1
+      ]
+    },
+    {
+      "name": "vertical-text",
+      "url": "https://raw.githubusercontent.com/LibreOffice/core/master/sw/qa/extras/ooxmlexport/data/btlr-textbox.docx",
+      "source_page": "https://github.com/LibreOffice/core/blob/master/sw/qa/extras/ooxmlexport/data/btlr-textbox.docx",
+      "git_blob_sha": "181d305eac95b17d1ba1644ceff10479757af1c2",
+      "sha256": "7403d7eceda7e0c12b04d02a08d964268427746a6ad65893625ddfde0756e61e",
+      "reason": "Visible 90-degree text in a bordered text box",
+      "rendered_source_pages": 1,
+      "selected_source_pages": [
+        1
+      ]
+    },
+    {
+      "name": "rotated-graphic",
+      "url": "https://raw.githubusercontent.com/LibreOffice/core/master/sw/qa/extras/ooxmlexport/data/position-and-rotation.docx",
+      "source_page": "https://github.com/LibreOffice/core/blob/master/sw/qa/extras/ooxmlexport/data/position-and-rotation.docx",
+      "git_blob_sha": "d883ad32e75e862afae482168e27d4dfcbc5e231",
+      "sha256": "258ce53be7efbe2584a12cbec75c7fe5590ce65fbf9dcd3cf644e63ff65b8836",
+      "reason": "Rotated thick-bordered graphic and text flowing on both sides",
+      "rendered_source_pages": 1,
+      "selected_source_pages": [
+        1
+      ]
+    }
+  ]
+}

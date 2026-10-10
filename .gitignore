@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+.ruff_cache/
+.cache/
+
+# Secrets and local configuration
+.env
+.env.*
+
+# Local agent and tool state
+.agents/
+.aws/
+.codex/
+openspec/
+
+# OS metadata
+.DS_Store
+*:Zone.Identifier
