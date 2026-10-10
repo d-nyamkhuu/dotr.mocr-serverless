@@ -1,10 +1,41 @@
 # dots.mocr Layout API on Modal
 
-High-throughput, scale-to-zero document layout parsing with
+Serverless document layout parsing with
 [`dots-studio/dots.mocr`](https://huggingface.co/dots-studio/dots.mocr). The
-public service is a small, protected API that accepts one PNG or JPEG and
+service is a small, protected API that accepts one page image (PNG or JPEG) and
 returns everything needed to render the result: normalized layout elements,
 Markdown, raw model output, dimensions, and token usage.
+
+## Why serverless
+
+The service runs on [Modal](https://modal.com) GPUs that exist only while there
+is work to do:
+
+- **Pay only for use.** Replicas scale to zero after 30 idle seconds, so an
+  idle deployment costs nothing. There is no always-on GPU to keep busy.
+- **Scales with demand.** Each replica serves up to 32 concurrent pages; a
+  burst brings up a second replica automatically, and requests beyond that
+  wait in Modal's queue instead of failing.
+- **Fast cold starts.** A warmed vLLM process is captured in a GPU memory
+  snapshot, so a replica starting from zero answers its first page in about
+  20 seconds instead of loading the model from scratch.
+- **Nothing to operate.** No cluster, load balancer, or autoscaler to run:
+  one `modal deploy` provisions the GPU, the endpoint, and the scaling rules.
+
+### Why one page per request
+
+The API accepts a single page image, not a PDF or other multi-page document.
+Modal scales replicas on the number of concurrent requests, and that number is
+only a good measure of load when every request is roughly the same amount of
+work. A page is: its cost is bounded by one image's tokens and one generation.
+A document is not: one request might be a single page and the next 400 pages,
+so counting documents would leave one replica overloaded while another sits
+idle, and a large document could run past the request timeout. Sending pages
+lets the platform spread a 400-page document across every available slot.
+
+Splitting documents into pages is cheap and happens on the client; the
+[batch client](#batch-client-and-benchmark) sends a folder of page images
+concurrently and keeps their order.
 
 vLLM remains private inside each Modal GPU container. Concurrent API requests
 are forwarded to its loopback-only OpenAI endpoint so vLLM can continuously
@@ -21,13 +52,13 @@ Saved results can be turned into editable Word documents with the local
 
 ## Contents
 
+- [Why serverless](#why-serverless)
 - [How it works](#how-it-works)
 - [Performance](#performance)
 - [Deploy](#deploy)
 - [API](#api)
-- [Concurrent client and benchmark](#concurrent-client-and-benchmark)
+- [Batch client and benchmark](#batch-client-and-benchmark)
 - [Export editable Word documents](#export-editable-word-documents)
-- [Runtime and security](#runtime-and-security)
 - [Development](#development)
 - [Model license and acceptable use](#model-license-and-acceptable-use)
 
@@ -55,12 +86,10 @@ GPU. Containers scale to zero when idle and restore from a memory snapshot.
 
 ## Performance
 
-Measured on 2026-10-10 against this repository's deployment: L40S replicas,
-vLLM `0.27.1`, and the settings in [Runtime and security](#runtime-and-security),
-except that the sweep below allowed 64 concurrent inputs per replica; see
-[Two replicas under a burst](#two-replicas-under-a-burst) for the current limit of 32.
-Latency is end to end, timed by the [benchmark](#concurrent-client-and-benchmark)
-running in a Modal container.
+Latency is end to end, timed by the [benchmark](#batch-client-and-benchmark).
+The sweep below allowed 64 concurrent inputs per replica; see
+[Two replicas under a burst](#two-replicas-under-a-burst) for why the limit is
+now 32.
 
 The 256 requests used 164 distinct document pages: arXiv papers rendered at
 150 DPI, IRS forms, and the Word exporter's regression pages. Repeated pages had
@@ -80,9 +109,9 @@ No request failed. A `degraded` response has unparseable layout JSON and no
 layout boxes. Four pages, three of them dense IRS forms, did this every time
 they ran: the model repeated content until it stopped at 18,016–20,059
 completion tokens. One more page stopped normally at 2,888 tokens with
-malformed JSON. A runaway page can dominate a small level: the 4-request level
-spent 140 of its 162 seconds on one. Completion tokens per second is therefore
-the steadier throughput measure.
+malformed JSON. At low concurrency a single such page skews the numbers: the
+4-request level spent 140 of its 162 seconds waiting on one. Completion tokens
+per second is therefore the steadier throughput measure.
 
 ![Latency percentiles and throughput by concurrency](assets/benchmarks/concurrency.png)
 
@@ -93,13 +122,18 @@ GPU:
 
 ### Cold and warm starts
 
-| Measurement | Result |
+The same pages were sent once with no replica running, then again to the now
+warm replica (with one pixel changed so vLLM could not reuse the cache):
+
+| Request | Total latency |
 |---|---:|
-| Warm request, single user, p50 | 10.6 s |
-| Cold request after scale to zero, restored from the GPU snapshot | 19.8–20.8 s |
-| The same page warm, one pixel changed | 7.6–8.3 s |
-| Cold-start overhead: container restore ~9 s, vLLM wake-up ~1 s | ~12 s |
-| First request when Modal builds a new GPU snapshot | 2.5–3 min |
+| Cold: replica starts from the GPU snapshot | 19.8–20.8 s |
+| Warm: same page, replica already running | 7.6–8.3 s |
+| Difference, the cost of starting from zero | ~12 s |
+| First request after a deployment, while Modal builds the snapshot | 2.5–3 min |
+
+Of the ~12 seconds, restoring the container takes about 9 and waking vLLM about
+1; the rest is scheduling and routing.
 
 Modal builds the snapshot on the first request after a deployment, which took
 2 min 42 s, and occasionally again later; that happened on one of the three
@@ -130,14 +164,14 @@ warm-up request:
 Each configuration ran once. Repeating the 64-input level varied throughput by
 about 10%, so the gain in throughput is modest; the even split between replicas
 is the clear change. The 32-input limit costs nothing below 32 concurrent
-requests. Above it, part of a burst on one warm replica waits about 15 seconds for the
-second replica's cold start.
+requests. Above it, the overflow waits about 15 seconds for the second replica
+to start.
 
 ![Start and duration of each request at concurrency 64, max_inputs=64](assets/benchmarks/timeline.png)
 
 The raw per-request results are in
 [`assets/benchmarks/2026-10-10.json`](assets/benchmarks/2026-10-10.json). Run the
-[benchmark](#concurrent-client-and-benchmark) on your own documents, since
+[benchmark](#batch-client-and-benchmark) on your own documents, since
 output length drives latency.
 
 ## Deploy
@@ -294,21 +328,19 @@ Expected errors use FastAPI's standard error response:
 }
 ```
 
-The protected deployment also exposes `/health`, `/metrics`, `/docs`, and
+The deployment also exposes `/health`, `/metrics`, `/docs`, and
 `/openapi.json`. Every route requires `Authorization: Bearer <token>`.
-CORS permits requests from any origin with the `Authorization` and
-`Content-Type` headers, without cookies. Preflight requests do not require
-authentication. Enter the token at runtime in the tester; never bake it into
-static assets. Modal proxy authentication is disabled on this OCR endpoint
-so browser preflight reaches the application's CORS middleware.
-Authentication runs inside the GPU container, so rejected requests can
-still incur container startup compute even though they cannot run OCR.
 
-## Concurrent client and benchmark
+Requests may take longer than Modal's initial 150-second web interval during
+cold starts or long generations, so clients must follow redirects (`curl -L`;
+enabled in the bundled client).
 
-The bundled client accepts any mixture of local PNG/JPEG paths and public HTTPS
-URLs. It sends one image per request, preserves input ordering, and prints the
-complete API responses:
+## Batch client and benchmark
+
+The bundled client accepts any mixture of local PNG/JPEG paths, directories of
+them, and public HTTPS URLs. It sends one image per request, keeps the input
+order, and writes the complete API responses to `--output` (or prints them when
+`--output` is omitted):
 
 ```bash
 export DOTS_MOCR_URL='https://<workspace>--api.modal.run'
@@ -317,9 +349,13 @@ export DOTS_MOCR_TOKEN='YOUR_OCR_BEARER_TOKEN'
 uv run python -m scripts.batch_client \
   --base-url "$DOTS_MOCR_URL" \
   --concurrency 32 \
-  assets/warmup.jpg \
-  assets/example.png
+  --output ocr.json \
+  pages/*.png
 ```
+
+Passing a directory, such as `pages/`, sends every PNG/JPEG file directly inside
+it in name order. The command exits with status 1 if any page failed; failed
+pages keep their `error` in the output so they can be retried.
 
 Run a concurrency sweep after deployment or after materially changing the
 workload. Use many distinct page images: vLLM caches repeated images, so a
@@ -359,41 +395,6 @@ uv run --extra word python -m word_export \
 See the [Word exporter guide](word_export/README.md) for the full workflow,
 scanned and rotated pages, the conversion engine, fidelity limits, and rendered
 checks.
-
-## Runtime and security
-
-- vLLM `0.27.1`, Modal `1.5.4`, one L40S, 8 CPU cores, and 24 GiB host memory
-  per replica.
-- Model revision `e539fbb52280393adc081b289ec597430a0f9031` is stored under
-  `/models/DotsMOCR-e539fbb5` in a persistent Modal Volume.
-- Each replica accepts at most 32 concurrent inputs, which is also vLLM's
-  batch limit. Additional demand scales horizontally up to a hard limit of two
-  replicas; requests beyond 64 wait in Modal's queue.
-- Replicas scale to zero after 30 idle seconds. No buffer replica is kept
-  warm while the service is active.
-- The Modal Function timeout and bundled client timeout are 15 minutes.
-  The private inference request has a 14-minute timeout, leaving room for image
-  transfer, processing, and returning the response. Container startup has a
-  separate 30-minute timeout for model initialization and snapshot creation.
-- Modal CPU/GPU memory snapshots capture a warmed vLLM process. vLLM is put
-  into level-one sleep before capture and restored before the public API is
-  marked ready, reducing repeated model initialization work after scale-to-zero.
-- Snapshot warm-up uses the bundled `assets/warmup.jpg` document,
-  the same image preprocessing as the parse API, and three 16-token completions.
-- Image preparation uses Pillow's Lanczos resizing directly, retaining the
-  previous 200/96 scale, pixel limits, and 28-pixel grid without converting
-  through PDF. Resampling changes the pixels, so OCR output may differ.
-  Preparation runs in Starlette's thread pool; inference uses asynchronous HTTP.
-  Decoded original and model images are closed before inference starts. Only
-  dimensions and the encoded model request are retained while awaiting vLLM.
-- Remote images must use HTTPS. The service rejects private/reserved addresses,
-  revalidates redirects, disables environment proxies, and limits download size
-  and duration. Pillow checks the actual PNG/JPEG format when decoding.
-  The address check happens before httpx connects, so it does not stop DNS
-  rebinding; use network egress rules if strict isolation is required.
-- Requests may exceed Modal's initial 150-second web interval during cold starts
-  or long generations. Clients must follow redirects (`curl -L`; enabled in the
-  bundled client).
 
 ## Development
 

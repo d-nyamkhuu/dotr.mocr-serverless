@@ -14,6 +14,8 @@ from typing import Any, Sequence
 
 import httpx
 
+IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png"}
+
 
 @dataclass
 class BatchResult:
@@ -55,6 +57,22 @@ def request_parts(source: str) -> tuple[dict[str, str], dict[str, tuple[str, byt
     if media_type not in {"image/jpeg", "image/png"}:
         raise ValueError(f"Unsupported image type for {path}: {media_type}")
     return {}, {"file": (path.name, path.read_bytes(), media_type)}
+
+
+def expand_sources(sources: Sequence[str]) -> list[str]:
+    """Replace each local directory with its PNG/JPEG files in name order."""
+    expanded = []
+    for source in sources:
+        path = Path(source).expanduser()
+        if not source.startswith("https://") and path.is_dir():
+            expanded.extend(
+                str(child)
+                for child in sorted(path.iterdir())
+                if child.is_file() and child.suffix.lower() in IMAGE_SUFFIXES
+            )
+        else:
+            expanded.append(source)
+    return expanded
 
 
 async def send_one(
@@ -115,23 +133,37 @@ async def send_many(
 
 def parser() -> argparse.ArgumentParser:
     arg_parser = argparse.ArgumentParser(description=__doc__)
-    arg_parser.add_argument("images", nargs="+", help="Local PNG/JPEG paths or HTTPS URLs")
+    arg_parser.add_argument(
+        "images", nargs="+", help="Local PNG/JPEG paths, directories of them, or HTTPS URLs"
+    )
     arg_parser.add_argument("--base-url", required=True, help="Deployed Modal endpoint URL")
     arg_parser.add_argument("--concurrency", type=int, default=32)
     arg_parser.add_argument("--timeout", type=float, default=900.0)
     arg_parser.add_argument("--token", default=os.getenv("DOTS_MOCR_TOKEN"))
+    arg_parser.add_argument(
+        "--output", type=Path, help="Write results to this JSON file instead of stdout"
+    )
     return arg_parser
 
 
 async def async_main(args: argparse.Namespace) -> int:
+    sources = expand_sources(args.images)
+    if not sources:
+        raise SystemExit("No PNG/JPEG images found")
     async with build_client(
         base_url=args.base_url,
         token=args.token,
         timeout=args.timeout,
     ) as client:
-        results = await send_many(client, args.images, concurrency=args.concurrency)
+        results = await send_many(client, sources, concurrency=args.concurrency)
 
-    print(json.dumps([asdict(result) for result in results], ensure_ascii=False, indent=2))
+    text = json.dumps([asdict(result) for result in results], ensure_ascii=False, indent=2)
+    if args.output:
+        args.output.write_text(text + "\n", encoding="utf-8")
+        failed = sum(1 for result in results if result.error)
+        print(f"Wrote {len(results)} results ({failed} failed) to {args.output}")
+    else:
+        print(text)
     return 1 if any(result.error for result in results) else 0
 
 

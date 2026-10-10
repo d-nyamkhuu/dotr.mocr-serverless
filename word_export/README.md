@@ -20,7 +20,7 @@ First, save the existing batch client's output:
 ```bash
 uv run python -m scripts.batch_client \
   --base-url "$DOTS_MOCR_URL" \
-  page1.png page2.jpg > results.json
+  --output results.json page1.png page2.jpg
 ```
 
 After that command succeeds, export the document:
@@ -75,7 +75,7 @@ uv run --extra word python -m scripts.prepare_scans \
 
 uv run python -m scripts.batch_client \
   --base-url "$DOTS_MOCR_URL" \
-  straightened/0001-page1.png straightened/0002-page2.png > results.json
+  --output results.json straightened/0001-page1.png straightened/0002-page2.png
 
 uv run --extra word python -m word_export \
   --results results.json --output document.docx \
