@@ -1,6 +1,6 @@
 # dots.mocr Layout API on Modal
 
-Serverless document layout parsing with
+Serverless document OCR and layout parsing with
 [`dots-studio/dots.mocr`](https://huggingface.co/dots-studio/dots.mocr). The
 service is a small, protected API that accepts one page image (PNG or JPEG) and
 returns everything needed to render the result: normalized layout elements,
